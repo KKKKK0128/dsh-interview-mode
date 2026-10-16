@@ -1,0 +1,13 @@
+# 依赖与本地状态
+node_modules/
+.pnpm-store/
+
+# 合成音频与日志（.test/live-interview.ps1 会重新生成）
+*.wav
+*.log
+*-log.txt
+
+# 系统噪声
+Thumbs.db
+.DS_Store
+desktop.ini

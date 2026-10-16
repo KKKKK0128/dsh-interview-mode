@@ -1,0 +1,102 @@
+# dsh-interview-mode — 模拟面试模式
+
+一个 DSH Desktop 的「模式」插件（`agentPresets` 里的 **mock-interview / 模拟面试模式**）：把电脑正在播放的声音**实时**采集下来，本地转写成文字，自动判断其中哪些话是**面试官提问**，再把提问作为聊天消息投递给**当前会话**的 Agent，让答案直接出现在对话里。
+
+- 采集与识别复用已装的 [`dsh-system-audio`](../dsh-system-audio)（WASAPI 环回 `native/LoopbackRecorder.exe` + 本地 SenseVoice），本插件只负责**分段、判定、投递、界面**。
+- 设计文档见 [`PLAN.md`](./PLAN.md)（v1.1，含取舍与被否掉的方案）。
+
+## 安装
+
+```powershell
+# 两个仓库克隆到同一个目录下（本插件依赖 system-audio 的相对路径）
+git clone https://github.com/KKKKK0128/dsh-system-audio.git
+git clone https://github.com/KKKKK0128/dsh-interview-mode.git
+
+$dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+& $dsh plugin --profile desktop add "<dsh-system-audio 目录>"
+& $dsh plugin --profile desktop add "<dsh-interview-mode 目录>"
+```
+
+装完重启 DSH Desktop（宿主模块按进程缓存）；只改 `lib/client.js` 不需要重启，新代码会热送到运行中的页面。
+
+## 交互
+
+| 动作 | 位置 |
+| --- | --- |
+| 开始/停止监听 | 侧边栏「模拟面试」图标 → 主面板的开关（**手动开始**，不自动开麦） |
+| 强制补答最近一句 | 面板「补答最近一句」按钮，或热键 **Ctrl+Shift+I** |
+| 设备 / 静音阈值 / 自动回答 | 面板里的下拉与输入框（`POST /interview/config`） |
+| 提问与答案 | **对话里**：提问以 `[模拟面试·面试官提问] …` 消息进入当前会话，Agent 的回答就是普通回复 |
+
+采集是「按静音切段」的循环：每段独立录音 → 转写 → 判定 → 投递，所以长面试不会攒成一个巨型音频。
+
+## 默认参数
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `silenceMs` | 700 | 静音多久算一句结束（250–10000） |
+| `minSpeechMs` | 800 | 短于这个时长的段直接丢弃 |
+| `minPeakRms` | 0.008 | 峰值低于此电平算静音段，丢弃（不进入缓冲、不投递） |
+| `maxSegmentMs` | 30000 | 单段上限（对应录音 `seconds` 的推导） |
+| `cooldownMs` | 300 | 两段之间的冷却 |
+| `dupSimilarity` / `dupWindowMs` | 0.9 / 10000 | 10 秒内相似度 ≥0.9 的提问视为重复，丢弃 |
+| `minQuestionChars` | 6 | 归一化后短于 6 字的段不投递 |
+| `autoAnswer` | true | 自动投递；关掉后只能热键补答 |
+| `maxBufferSeconds` / `maxSegments` | 30 / 60 | 滚动缓冲，供「补答最近一句」 |
+| `interruptWhenBusy` | false | Agent 忙时排队（**默认**），true 才 `cancel` 后 `steer` |
+| `language` | `auto` | 跟随 SenseVoice 判定 |
+| `hotkey` | `Ctrl+Shift+I` | 页面内热键 |
+
+## 路由（宿主半，`webServer.register` 的 exact 路由）
+
+```
+GET  /interview/ping         → { ok, engine:'idle'|'listening', sessionId, preset:{id,ok,error,registeredAt} }
+GET  /interview/status       → 状态快照：state/sessionId/level/lastText/delivered/dropped/errors/settings/segments[]
+GET  /interview/devices      → { ok, default, devices[], speech }
+POST /interview/start        → { ok, state }   body: { sessionId?, deviceId? }
+POST /interview/stop         → { ok, state }
+POST /interview/answer-last  → { ok, delivered, text }   热键/按钮的补答
+POST /interview/config       → { ok, settings }  body: { deviceId?, autoAnswer?, silenceMs?, language?, hotkey?, interruptWhenBusy? }
+```
+
+投递走宿主服务 `sessionController.prompt({ requestId, sessionId, mode, content:[{type:'text',text}] }, signal)`：
+- `sessionId` 面板没指定时，从 `sessionController.list()` 里挑「最近更新的非空会话」（`errors` 会记录「没有可投递的会话」）。
+- **第二个参数 AbortSignal 必须传**：服务内部会调用 `signal.throwIfAborted()`，漏传会以 `Cannot read properties of undefined (reading 'throwIfAborted')` 静默失败（本项目踩过，见 `.test/engine-check.mjs` 的假实现已强制校验）。
+
+## 文件
+
+```
+lib/index.js    宿主入口：注册 preset（mock-interview）+ 3 个 agent 工具用的依赖 + /interview 路由
+lib/engine.js   分段引擎（状态机、去重、忙时排队、滚动缓冲、投递）
+lib/prompt.js   模式提示词 section、提问判定（CJK/英文线索 + 结尾问号）、文本归一化与相似度
+lib/routes.js   7 条 exact 路由 + JSON 助手
+lib/client.js   浏览器半：sidebar.panellist 图标（id interview, order 40）+ main 面板（key interview）
+cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.client.platform）
+```
+
+依赖：`dsh-system-audio`（两个仓库请**克隆到同一父目录**，本仓库用 `node_modules` 软链引用 `dsh-system-audio/recorder` 与 `dsh-system-audio/speech`；如果两个包都已发到 npm，把 `package.json` 里的 `link:../dsh-system-audio` 换成 `^0.1.0` 即可）。
+
+## 测试
+
+```bash
+NODE="$USERPROFILE/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
+"$NODE" .test/engine-check.mjs    # 16/16：提问判定、相似度、会话选择、分段引擎、忙时排队、静音段丢弃、config 夹取
+"$NODE" .test/host-check.mjs      # 10/10：路由行为 + 卸载
+"$NODE" .test/client-check.mjs    # 侧边栏注册 + 面板渲染（含 dsh-system-audio 不再注册输入框按钮）
+```
+
+现场端到端（**需要非沙箱**：沙箱进程放出的声音进不了环回采集）：
+
+```powershell
+pwsh -NoProfile -File .test/live-interview.ps1
+```
+
+它会用 SAPI 合成一句「提问 + 陈述 + 提问」的中文（`.test/question-zh.wav`，已生成则复用），`POST /interview/start` 后播放，再打印 `/interview/status` 与 `/interview/stop`。
+
+**2026-10-16 实测**：3 段全部转写正确；「请你介绍一下你在光电硬件方面最擅长的项目经验。」与「…难点在哪里呢？」判定为提问并 `delivered:true`；「后来读了硕士。」判为陈述丢弃；`errors: []`；`sessionId` 自动解析为当时的活动会话。
+
+## 注意
+
+- **宿主半改动要重启 DSH Desktop**（宿主模块按进程缓存）；`lib/client.js` 的改动会热送到运行中的页面。
+- 采集只监听**系统输出**（WASAPI loopback），不碰麦克风；停止监听即结束采集，应用退出前请先停。
+- 音频不入库：每段的临时 WAV 在转写后即删除，只保留文字片段（滚动缓冲见 `maxSegments`）。

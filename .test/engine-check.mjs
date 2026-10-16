@@ -1,0 +1,307 @@
+/**
+ * dsh-interview-mode — 离线 battery。
+ *
+ * 不需要 DSH、不需要音频设备、不需要网络：采集与转写全部用假实现注入引擎，
+ * 断言「分段 → 转写 → 判定 → 投递 / 去重 / 补答 / 忙时排队」的行为。
+ *
+ *   node .test/engine-check.mjs
+ */
+
+import assert from 'node:assert/strict'
+
+import { InterviewEngine, isSessionRunning, pickSessionId } from '../lib/engine.js'
+import {
+  FOLLOWUP_TAG,
+  QUESTION_TAG,
+  looksLikeQuestion,
+  normalizeText,
+  similarity,
+} from '../lib/prompt.js'
+
+let passed = 0
+let failed = 0
+
+function check(label, fn) {
+  try {
+    fn()
+    passed += 1
+    console.log(`  ok   ${label}`)
+  } catch (error) {
+    failed += 1
+    console.log(`  FAIL ${label}\n       ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** 异步用例：必须 await，否则断言会脱离调用点（Node 24 会把未处理拒绝当致命错误）。 */
+async function checkAsync(label, fn) {
+  try {
+    await fn()
+    passed += 1
+    console.log(`  ok   ${label}`)
+  } catch (error) {
+    failed += 1
+    console.log(`  FAIL ${label}\n       ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function waitFor(predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await sleep(20)
+  }
+  return predicate()
+}
+
+/* ------------------------------------------------------------------ fakes */
+
+function makeCapture(segments) {
+  const state = { index: 0, killed: 0, current: null }
+  const makeSession = () => {
+    const levels = state.current?.levels ?? [
+      { t: 0.2, rms: 0.05, db: -26.02 },
+      { t: 0.6, rms: 0.09, db: -20.92 },
+    ]
+    return {
+      levels,
+      settled: Promise.resolve(),
+      lastLevel: () => levels[levels.length - 1],
+      stop: async () => {},
+      kill: () => { state.killed += 1 },
+      stdio: 'pipes',
+    }
+  }
+  return {
+    state,
+    startCaptureAuto: async () => {
+      state.current = segments[state.index] ?? null
+      state.index += 1
+      return makeSession()
+    },
+    finishCapture: async () => ({
+      seconds: state.current?.seconds ?? 0,
+      peak: state.current?.peak ?? 0,
+      rms: 0.05,
+      path: `C:\\fake\\segment-${state.index}.wav`,
+      stream: false,
+    }),
+    captureWaveBytes: async () => Buffer.from('RIFF____WAVE'),
+    discardCapture: () => {},
+    listDevices: async () => ({ default: 'fake-default', devices: [] }),
+  }
+}
+
+function makeSpeech(texts) {
+  let index = 0
+  return {
+    DEFAULT_WAIT_MS: 1000,
+    ensureReady: async () => ({ providerId: 'fake', phase: 'ready', language: 'zh', languages: ['zh'] }),
+    transcribeWav: async () => {
+      const text = texts[index] ?? ''
+      index += 1
+      return { text, language: 'zh', audioSeconds: 2, inferenceSeconds: 0.05 }
+    },
+    speechState: () => ({ providerId: 'fake', phase: 'ready', language: 'zh', languages: ['zh'] }),
+  }
+}
+
+function makeSessions(records, options = {}) {
+  const running = options.running === true
+  const sessions = options.sessions ?? [{ sessionId: 's-target', updatedAt: 5, running, blank: false }]
+  return {
+    // 真实 sessionController 的第二个参数是 AbortSignal 且内部会 throwIfAborted()，
+    // 假实现同样要求它非空，否则引擎漏传 signal 时离线测试也会失败。
+    list: async (_request, signal) => {
+      signal.throwIfAborted()
+      return sessions
+    },
+    prompt: async (request, signal) => {
+      signal.throwIfAborted()
+      records.push(request)
+      return { accepted: true }
+    },
+    cancel: async () => ({ accepted: true }),
+  }
+}
+
+function makeEngine(segments, texts, records, options = {}) {
+  const capture = makeCapture(segments)
+  const speech = makeSpeech(texts)
+  const sessions = makeSessions(records, options)
+  const engine = new InterviewEngine({
+    capture,
+    speech,
+    speechService: () => ({}),
+    sessionController: () => sessions,
+    settings: { cooldownMs: 10, ...(options.settings ?? {}) },
+  })
+  return { engine, capture, speech, sessions }
+}
+
+/* ------------------------------------------------------------- pure checks */
+
+console.log('提问判定（第一道闸）')
+const questions = [
+  '请你介绍一下你在光电硬件方面最擅长的项目经验。',
+  '这个 ADC 的采样率是多少？',
+  '你为什么选择这个技术路线',
+  '讲讲你对 SNR 和 ENOB 的理解',
+  '你会怎么排查这个时序问题',
+  '能不能说说你的论文创新点',
+  '哪些工具你比较熟练',
+  '这个项目的难点在哪里呢',
+  '有没有做过流片相关的工作',
+  'What is your biggest strength',
+]
+const statements = [
+  '我本科就读于山东大学应用物理专业',
+  '这个项目做了大约半年时间',
+  '我们用了因果时序卷积网络来做校正',
+  '数据一共有三组训练集和测试集',
+  '我当时负责硬件部分的调试',
+  '论文初稿已经写完了',
+  '实验室的设备是比较新的',
+  '老师建议我把结果整理成图表',
+  '今天的面试就到这里吧',
+  '这段录音是系统播放出来的',
+]
+check('10 条提问全部识别为提问', () => {
+  for (const text of questions) assert.equal(looksLikeQuestion(text), true, text)
+})
+check('10 条陈述全部识别为非提问', () => {
+  for (const text of statements) assert.equal(looksLikeQuestion(text), false, text)
+})
+
+console.log('去重相似度')
+check('同一句话（仅标点不同）相似度为 1', () => {
+  assert.equal(similarity('请问你叫什么名字？', '请问你叫什么名字'), 1)
+})
+check('两句话差异明显时相似度低', () => {
+  assert.ok(similarity('今天天气不错', '请介绍一下你的项目经历') < 0.2)
+})
+check('normalizeText 去掉空白与标点', () => {
+  assert.equal(normalizeText(' 你好，世界！ Hello, world. '), '你好世界helloworld')
+})
+
+console.log('会话选择')
+check('pickSessionId 跳过空会话并取最近更新的', () => {
+  const list = [
+    { sessionId: 'old', updatedAt: 10, blank: false },
+    { sessionId: 'blank', updatedAt: 99, blank: true },
+    { sessionId: 'new', updatedAt: 50, blank: false },
+  ]
+  assert.equal(pickSessionId(list), 'new')
+})
+check('pickSessionId 优先返回面板指定的会话', () => {
+  const list = [{ sessionId: 'old', updatedAt: 10 }, { sessionId: 'new', updatedAt: 50 }]
+  assert.equal(pickSessionId(list, 'old'), 'old')
+})
+check('isSessionRunning 只看目标会话', () => {
+  const list = [{ sessionId: 'a', running: false }, { sessionId: 'b', running: true }]
+  assert.equal(isSessionRunning(list, 'b'), true)
+  assert.equal(isSessionRunning(list, 'a'), false)
+})
+
+/* ---------------------------------------------------------- engine checks */
+
+console.log('分段引擎')
+{
+  const records = []
+  const segments = [
+    { text: '请你介绍一下你在光电硬件方面最擅长的项目经验。', peak: 0.2, seconds: 3 },
+    { text: '我本科是应用物理专业，后来读了硕士。', peak: 0.2, seconds: 2 },
+    { text: '请你介绍一下你在光电硬件方面最擅长的项目经验', peak: 0.2, seconds: 3 },
+  ]
+  const { engine } = makeEngine(segments, segments.map((segment) => segment.text), records)
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 3 && engine.delivered >= 1)
+  check('提问被投递、陈述不投递、重复问题被去重', () => {
+    assert.equal(records.length, 1)
+    assert.equal(engine.delivered, 1)
+    assert.equal(engine.dropped, 1)
+    assert.equal(engine.segments.length, 3)
+    assert.equal(engine.segments[0].delivered, true)
+    assert.equal(engine.segments[1].reason, 'not-a-question')
+    assert.equal(engine.segments[2].reason, 'duplicate')
+  })
+  check('投递的是带标记的提问消息', () => {
+    const text = records[0].content[0].text
+    assert.ok(text.startsWith(QUESTION_TAG), text)
+    assert.ok(text.includes('光电硬件'), text)
+    assert.equal(records[0].sessionId, 's-target')
+    assert.equal(records[0].mode, 'queue')
+    assert.equal(records[0].content[0].type, 'text')
+    assert.equal(typeof records[0].requestId, 'string')
+  })
+  await checkAsync('热键补答投递最近缓冲内容', async () => {
+    const result = await engine.answerLast()
+    assert.equal(result.delivered, true)
+    assert.equal(records.length, 2)
+    const text = records[1].content[0].text
+    assert.ok(text.startsWith(FOLLOWUP_TAG), text)
+  })
+  check('status 快照可供面板渲染', () => {
+    const status = engine.status()
+    assert.equal(status.state, 'listening')
+    assert.equal(status.sessionId, 's-target')
+    assert.equal(status.segments.length, 3)
+    assert.equal(typeof status.settings.silenceMs, 'number')
+    assert.equal(status.preset, undefined)
+  })
+  await engine.stop()
+  check('stop() 之后回到 idle 且不留采集会话', () => {
+    assert.equal(engine.state, 'idle')
+    assert.equal(engine.status().state, 'idle')
+  })
+}
+
+console.log('忙时排队与积压丢弃')
+{
+  const records = []
+  const segments = [
+    { text: '第一个问题是什么？', peak: 0.2, seconds: 3 },
+    { text: '第二个问题怎么处理？', peak: 0.2, seconds: 3 },
+    { text: '第三个问题如何优化？', peak: 0.2, seconds: 3 },
+  ]
+  const { engine } = makeEngine(segments, segments.map((segment) => segment.text), records, { running: true })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 3 && engine.delivered >= 2)
+  check('Agent 忙时仍然排队投递，超过 2 条后丢弃最新提问', () => {
+    assert.equal(engine.delivered, 2)
+    assert.equal(engine.dropped, 1)
+    assert.equal(records.length, 2)
+    assert.equal(engine.segments[2].reason, 'backlog')
+  })
+  await engine.stop()
+}
+
+console.log('静音段与配置夹取')
+{
+  const records = []
+  const segments = [{
+    text: '请问你叫什么名字？',
+    peak: 0.0001,
+    seconds: 3,
+    levels: [{ t: 0.2, rms: 0.00005, db: -86.02 }],
+  }]
+  const { engine } = makeEngine(segments, ['请问你叫什么名字？'], records)
+  await engine.start({ sessionId: 's-target' })
+  await sleep(400)
+  check('电平过低的分段被丢弃，不进入缓冲也不投递', () => {
+    assert.equal(engine.segments.length, 0)
+    assert.equal(records.length, 0)
+  })
+  check('configure 夹取数值区间', () => {
+    const settings = engine.configure({ silenceMs: 99999, dupSimilarity: 5, autoAnswer: false, deviceId: null })
+    assert.equal(settings.silenceMs, 10000)
+    assert.equal(settings.dupSimilarity, 1)
+    assert.equal(settings.autoAnswer, false)
+    assert.equal(settings.deviceId, '')
+  })
+  await engine.stop()
+}
+
+console.log(`\n${failed === 0 ? 'ALL ENGINE CHECKS PASSED' : 'ENGINE CHECKS FAILED'}  (passed ${passed}, failed ${failed})`)
+process.exit(failed === 0 ? 0 : 1)
