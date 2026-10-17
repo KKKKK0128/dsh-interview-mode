@@ -4,11 +4,15 @@
 # 必须在**非沙箱**进程里跑：沙箱内既没有 SAPI 语音、播放出的声音也进不了环回采集。
 #
 #   pwsh -NoProfile -File .test/live-interview.ps1
+# DSH 服务端端口每次重启可能变化：不是 19387 时用 -Base 传当前 GUI 地址，
+# 例如 -Base http://127.0.0.1:55475/interview
+
+param([string]$Base = 'http://127.0.0.1:19387/interview')
 
 $ErrorActionPreference = 'Stop'
 # 音频固定生成在脚本旁边的目录里，不写死本机绝对路径。
 $wav = Join-Path $PSScriptRoot 'question-zh.wav'
-$base = 'http://127.0.0.1:19387/interview'
+$base = $Base.TrimEnd('/')
 
 $script = '请你介绍一下你在光电硬件方面最擅长的项目经验。我本科是应用物理专业，后来读了硕士。这个项目的难点在哪里呢？'
 

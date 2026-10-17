@@ -1,10 +1,14 @@
-# Live check: does the running app inline the configured knowledge base into the delivered question?
+﻿# Live check: does the running app inline the configured knowledge base into the delivered question?
 # ASCII-only source on purpose: Windows PowerShell 5.1 reads BOM-less .ps1 as ANSI and would choke
 # on Chinese literals. The question text lives in .kb-live-question.txt (UTF-8) and the report is
 # written as UTF-8 JSON so the caller can read it without console codepage games.
+# The DSH port changes between restarts: pass -Base with the current GUI URL when
+# 19387 is not it (e.g. -Base http://127.0.0.1:55475/interview).
+param([string]$Base = 'http://127.0.0.1:19387/interview')
+
 $ErrorActionPreference = 'Stop'
 $root = 'F:\Users\Wenkai\Documents\deepseek-harness\default-workspace'
-$base = 'http://127.0.0.1:19387/interview'
+$base = $Base.TrimEnd('/')
 $kbDir = "$root\dsh-interview-mode\.test\.kb-live"
 $qfile = "$root\dsh-interview-mode\.test\.kb-live-question.txt"
 $wav = "$kbDir\q.wav"

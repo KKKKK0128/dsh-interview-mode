@@ -3,7 +3,7 @@
 一个 DSH Desktop 的「模式」插件（`agentPresets` 里的 **mock-interview / 模拟面试模式**）：把电脑正在播放的声音**实时**采集下来，本地转写成文字，自动判断其中哪些话是**面试官提问**，再把提问作为聊天消息投递给**当前会话**的 Agent，让答案直接出现在对话里。
 
 - 采集与识别复用已装的 [`dsh-system-audio`](../dsh-system-audio)（WASAPI 环回 `native/LoopbackRecorder.exe` + 本地 SenseVoice），本插件只负责**分段、判定、投递、界面**。
-- 设计文档见 [`PLAN.md`](./PLAN.md)（v1.6，含取舍与被否掉的方案）。
+- 设计文档见 [`PLAN.md`](./PLAN.md)（v1.8，含取舍与被否掉的方案）。
 
 ## 安装
 
@@ -25,6 +25,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | --- | --- |
 | 开始/停止监听 | **右侧栏「模拟面试转写」标签页**的开关，或左面板设置里的同一个开关（**手动开始**，不自动开麦） |
 | 强制补答最近一句 | 标签页/面板的「补答最近一句」按钮，或热键 **Ctrl+Shift+I** |
+| 立即回答（不用等静音判定） | 「**立即回答**」按钮（标签页实时区 / 主面板设置里都有），或热键 **Ctrl+Shift+U**：立刻结束**正在采的这一段**并投递，不等静音切段、也不看它像不像提问（去重仍然生效）。适用于面试官说完停在那里、或这句话已经在转写但还没被判定成提问；不在监听时等价于补答最近内容 |
 | 查看转写历史 | 右侧栏标签页：实时电平、最近一句、片段列表（时间 / 文本 / 是否已投递 / 补答 / 复制）。**每次开始监听都会清空上一轮的片段与计数** |
 | 打开转写标签页 | 开始监听后自动打开一次；也可在右侧栏 `+` 菜单里选「模拟面试转写」 |
 | 设备 / 静音阈值 / 自动回答 | 左栏「模拟面试」图标 → 主面板（**只留设置**），写 `POST /interview/config` |
@@ -33,6 +34,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | 提问与答案 | **对话里**：提问以 `[模拟面试·面试官提问] …` 消息进入当前会话，Agent 的回答就是普通回复 |
 | 选择知识库 | 主面板设置里的「**知识库**」：把资料**文件夹或文件**的完整路径粘进输入框 → 「添加」（回车也行），下拉框切换、可「移除」。宿主读取其中的文本资料（`.md/.txt/.json/代码` 等，`.docx` 现场抽正文）并**内联进每条提问消息**的 `[知识库]` 段，回答优先依据它；提示行显示「已内联 N/M 个文件 · xx KB」或错误原因 |
 | 提问灵敏度 | 主面板设置里的「**提问灵敏度**」下拉框（`questionSensitivity`）：`standard`（默认）= 疑问线索 + 结尾「吗/呢/么」；`strict` = 只认疑问线索（旧行为）；`high` = 再加话题名词、请求式开头，并把紧跟提问的短句（「具体一点」）当追问兜底。漏报会丢掉面试官的问题，误报只是多答一次，**听不清就调高** |
+| 长回答（细节描述型） | 「**长回答**」按钮紧挨着补答/立即回答：每一条转写片段后面（把**这一条**原文重投）以及实时区/主面板的按钮行（重投最近缓冲区）。走 `POST /interview/answer-long`，消息以 `[模拟面试·长回答请求]` 开头，要求按 **5 分钟口读**准备的细节长版本（结论 → 背景与目标 → 方案与关键细节 → 结果与收尾）；同样不看提问判定、也不去重，所以可以「先短答一遍、再点长回答展开」 |
 
 右侧栏标签页由可选插件 [`DSH-better-sidebar`](https://www.npmjs.com/package/dsh-better-sidebar) 提供（DSH 客户端服务 `ctx.betterSidebar`）；没装它时插件自动退回「全部功能都在左面板」的旧形态，不报错。面板与标签页的内容超出高度时可**上下滚动**（转写列表另有独立滚动区，最多占 46vh，保证上方的开关始终可见）。
 
@@ -42,7 +44,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `silenceMs` | 700 | 静音多久算一句结束（250–10000） |
+| `silenceMs` | 1000 | 静音多久算一句结束（250–10000）。面试官提问中间常有 0.5–1 秒的思考停顿，默认放宽到 1 秒，避免一句话被切成两段（被切掉的前半段往往不像提问） |
 | `minSpeechMs` | 800 | 短于这个时长的段直接丢弃 |
 | `minPeakRms` | 0.008 | 峰值低于此电平算静音段，丢弃（不进入缓冲、不投递） |
 | `maxSegmentMs` | 30000 | 单段上限（对应录音 `seconds` 的推导） |
@@ -57,19 +59,21 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | `language` | `auto` | 识别语言：`auto` = 交给 SenseVoice 语种识别（英文段再以 `en` 重转一次兜底）；`zh` / `en` = 强行按该语言转写 |
 | `knowledgeBase` | `''` | 当前选中的资料文件夹/文件，`''` = 不使用知识库；内容会内联进每条提问消息 |
 | `knowledgeList` | `[]` | 面板保存过的候选路径（最多 20 条，下拉框选项） |
-| `hotkey` | `Ctrl+Shift+I` | 页面内热键 |
+| `hotkey` | `Ctrl+Shift+I` / `Ctrl+Shift+U` | 页面内热键：补答最近一句 / 立即回答当前段 |
 
 ## 路由（宿主半，`webServer.register` 的 exact 路由）
 
 ```
 GET  /interview/ping         → { ok, engine:'idle'|'listening', sessionId, preset:{id,ok,error,registeredAt} }
-GET  /interview/status       → 状态快照：state/sessionId/level/lastText/delivered/dropped/errors/settings/segments[]
+GET  /interview/status       → 状态快照：state/sessionId/level/lastText/delivered/dropped/errors/settings/inflight/segments[]（`inflight` = 正在采的这一段：`{ recording, seconds, transcribing, answering }`，空闲时为 `null`）
 GET  /interview/sessions     → { ok, error, items:[{ sessionId, title, updatedAt, running, blank, current, target }], current, target }
 GET  /interview/knowledge    → { ok, path, kind, error, included, totalFiles, bytes, truncated, blockChars, files:[{ rel, bytes, included, reason }] }（?path= 指定路径，缺省用当前配置；?refresh=1 跳过热缓存。**不下发内联正文**）
 GET  /interview/devices      → { ok, default, devices[], speech }
 POST /interview/start        → { ok, state }   body: { sessionId?, deviceId? }
 POST /interview/stop         → { ok, state }
 POST /interview/answer-last  → { ok, delivered, text }   热键/按钮的补答
+POST /interview/answer-now   → { ok, delivered, text, reason? }   立即回答：结束当前正在采的段并立刻投递（reason: nothing-heard / timeout / stopped）
+POST /interview/answer-long  → { ok, delivered, text }   body: { text?, sessionId? }  长回答：把指定片段（缺省＝最近缓冲区）按细节描述型长版本重投，不看提问判定与去重
 POST /interview/config       → { ok, settings }  body: { deviceId?, autoAnswer?, silenceMs?, targetSessionId?, language?, questionSensitivity?, knowledgeBase?, knowledgeList?, hotkey?, interruptWhenBusy? }
 ```
 
@@ -84,7 +88,7 @@ lib/index.js    宿主入口：注册 preset（mock-interview）+ 3 个 agent �
 lib/engine.js   分段引擎（状态机、去重、忙时排队、滚动缓冲、投递）
 lib/prompt.js   模式提示词 section、提问判定（CJK/英文线索 + 结尾问号）、文本归一化与相似度
 lib/knowledge.js 知识库：路径规范化、目录扫描（跳过 node_modules/隐藏/超深/超大）、体积截断与总预算、.docx 正文抽取、拼装 [知识库] 内联块
-lib/routes.js   9 条 exact 路由 + JSON 助手
+lib/routes.js   11 条 exact 路由 + JSON 助手
 lib/client.js   浏览器半：sidebar.panellist 图标（id interview, order 40）+ main 面板（key interview）
 cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.client.platform）
 ```
@@ -95,13 +99,15 @@ cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.clie
 
 ```bash
 NODE="$USERPROFILE/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
-"$NODE" .test/engine-check.mjs     # 42/42：提问判定（含英文线索、三档灵敏度）、相似度、会话选择（含固定目标会话 / 目标消失拒投）、分段引擎、忙时排队、静音段丢弃、config 夹取、英文识别（语言提示 + 自动重转）、知识库（摘要/缓存/内联进投递消息/规范化/开始监听清空记录）、提问灵敏度（三档 + 追问兜底）
+"$NODE" .test/engine-check.mjs     # 51/51：提问判定（含英文线索、三档灵敏度）、相似度、会话选择（含固定目标会话 / 目标消失拒投）、分段引擎、忙时排队、静音段丢弃、config 夹取、英文识别（语言提示 + 自动重转）、知识库（摘要/缓存/内联进投递消息/规范化/开始监听清空记录）、提问灵敏度（三档 + 追问兜底）、立即回答（status.inflight / 提前收尾投递 / 超短音频不投 / 空闲降级）、长回答（长标记重投 / 绕过去重与长度闸 / 缺省用缓冲区 / 空缓冲报错）
 "$NODE" .test/knowledge-check.mjs  # 26/26：路径规范化、目录扫描的包含与排除、体积截断与总预算（小文件优先）、.docx（现场生成的 zip）正文抽取、无资料时的降级文案
-"$NODE" .test/host-check.mjs       # 13/13：9 条路由行为（含 GET /interview/knowledge、config 的灵敏度夹取）+ 卸载
-"$NODE" .test/client-check.mjs     # 侧边栏注册 + 面板渲染 + 选择对话 + 识别语言 + 知识库下拉框 + 提问灵敏度下拉框（含 dsh-system-audio 不再注册输入框按钮）
+"$NODE" .test/host-check.mjs       # 16/16：11 条路由行为（含 GET /interview/knowledge、POST /interview/answer-now、POST /interview/answer-long、config 的灵敏度夹取）+ 卸载
+"$NODE" .test/client-check.mjs     # 侧边栏注册 + 面板渲染 + 选择对话 + 识别语言 + 知识库下拉框 + 提问灵敏度下拉框 + 「立即回答」「长回答」按钮与 Ctrl+Shift+U 热键（含 dsh-system-audio 不再注册输入框按钮）
 ```
 
 现场端到端（**需要非沙箱**：沙箱进程放出的声音进不了环回采集）：
+
+> **端口会变**：DSH 服务端端口每次重启可能不同。下面几个脚本默认 `http://127.0.0.1:19387/interview`，对不上时传当前 GUI 地址覆盖，例如 `-Base http://127.0.0.1:55475/interview`——`live-interview.ps1` / `live-kb.ps1` / `live-sensitivity.ps1` / `live-answer-now.ps1` 都支持这个参数。
 
 ```powershell
 pwsh -NoProfile -File .test/live-interview.ps1
@@ -130,6 +136,22 @@ powershell.exe -NoProfile -File .test/live-sensitivity.ps1
 ```
 
 **2026-10-17 实测**：纯陈述「我在研究生阶段负责ADC的校正工作。」三档都判 `not-a-question`（没有引入新的误报）；「我的项目难点在于时钟树和功耗。」在 `strict`/`standard` 下丢弃、在 `high` 下判提问（弱话题名词这条线索生效）；语气词句「你实习过吗」三档都判提问——SenseVoice 自己补了问号，所以 `strict` 与 `standard` 在真实音频上差别很小，实际增益主要来自 `high` 档与 `minQuestionChars` 6 → 4。转写仍有个别错字（`功耗`→`工号`、`时钟树`→`时钟数`），不影响判定。
+
+**逐段收尾与立即回答（v1.7）**：静音判定的默认值从 700 ms 放宽到 **1000 ms**（`silenceMs`，范围不变）——面试官提问中间常有半秒到一秒的思考停顿，700 ms 容易把一句话切成两段，而前半段往往不带疑问线索、直接被判成陈述丢掉。放宽只是「略微延长」，切段上限仍是 `maxSegmentMs`（30 s）。
+
+「立即回答」是这条链路上的手动出口：`POST /interview/answer-now`（面板按钮 / **Ctrl+Shift+U**）会**结束当前正在采集的那一段**并把它直接投递，不等静音切段、也不看它像不像提问，`minQuestionChars` 与 `minPeakRms` 也一并让路（只保留去重，避免同一句话投两遍）。三种时序都覆盖：正在录音 → `session.stop()` 提前收尾；已经录完、正在转写或正在判定 → 段对象上标 `manual: true` / `reason: 'manual'`，转写完立刻投递；不在监听或两段之间的空档 → 降级成「补答最近内容」（和 Ctrl+Shift+I 同路）。为了挡住极短误触，强制路径仍要求音频不短于 0.2 s，否则返回 `reason: 'nothing-heard'` 并把提示打在面板上；等待上限 12 s（`reason: 'timeout'`），监听被停掉时以 `reason: 'stopped'` 收尾。`GET /interview/status` 多了一个 `inflight` 字段（`{ recording, seconds, transcribing, answering }`，空闲为 `null`），面板据此显示「录音中 1.2s / 正在转写…」并把按钮点亮，所以「已经在转写但还没判定」这句话一眼可见、一键可答。
+
+**立即回答现场校验（v1.7）**：`.test/live-answer-now.ps1` 把同一段**长陈述**（`.test/.now-lines.txt`，SAPI 合成）播两轮——第一轮正常播完（应当被判成陈述、`reason:'not-a-question'`），第二轮播到一半调 `POST /interview/answer-now`（应当被提前收尾、`manual:true` 且照投）。投递目标故意设成不存在的会话 id（`live-now-probe`），所以只会在 `/interview/status` 里看到转写、不会真的进任何对话；脚本还会打印录音中的 `inflight`、跑完把 `dupWindowMs`/`targetSessionId` 复位。同样需要**非沙箱**：
+
+```powershell
+powershell.exe -NoProfile -File .test/live-answer-now.ps1
+```
+
+**答案长度与长回答（v1.8）**：模式提示词里对答案长度的要求从「中文 120–250 字 / 英文 80–160 词」改成**按口读时间**约束——默认中文 **500–800 字**（口读约 2.5–4 分钟，硬上限 1200 字 ≈ 5 分钟），英文约 300–500 词（硬上限约 750 词），并且每个要点都要给细节（数字、取舍、踩过的坑），而不是堆形容词。
+
+「长回答」（v1.8）是把同一道题再展开一遍的入口：面板上每条转写片段后面的「**长回答**」按钮（紧挨着「补答」）会把**这一条原文**重投，实时区/主面板按钮行里的同一个按钮则重投最近缓冲区；走 `POST /interview/answer-long`，消息以 `[模拟面试·长回答请求]` 开头，要求中文 1000–1200 字（英文约 650–750 词）的细节描述型长版本，结构固定为「结论 → 背景与目标 → 方案与关键细节（数字、取舍、失败与修复）→ 结果与一句话收尾」。它和补答一样**不看提问判定、不去重**，所以「先听短答、再点长回答」不会因为和上一句重复而被丢掉；缓冲为空时报「最近没有可长答的内容」。
+
+> 长度是提示词约束、不是硬截断：模型一般会落在区间内，但真要压到精确秒数仍要看实际朗读速度（中文口播约 200–250 字/分钟）。觉得还是太长/太短，改 `lib/prompt.js` 的 `INTERVIEW_PROMPT` 与 `LONG_NOTE` 即可（宿主半，改完重启）。
 
 ## 注意
 

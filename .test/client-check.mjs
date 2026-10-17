@@ -325,6 +325,11 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 	check("hotkey listener is removed on unmount", /document\.removeEventListener\(\s*["']keydown["']/.test(source));
 	check("hotkey is Ctrl+Shift+I", /HOTKEY_KEY\s*=\s*["']i["']/.test(source) && /ctrlKey\s*!==\s*true/.test(source));
 	check("hotkey posts to /interview/answer-last", /\/answer-last/.test(source));
+	check("answer-now hotkey is Ctrl+Shift+U", /HOTKEY_NOW_KEY\s*=\s*["']u["']/.test(source));
+	check("answer-now hotkey posts to /interview/answer-now", /\/answer-now/.test(source));
+	check("panel offers an answer-now control", /label\(t,\s*["']answerNow["']\)/.test(source));
+	check("long-answer control posts to /interview/answer-long", /\/answer-long/.test(source));
+	check("panel offers a long-answer control", /label\(t,\s*["']answerLong["']\)/.test(source));
 	check("migrated clip flow hits /system-audio start/status/stop", /\/start/.test(source) && /\/status\?id=/.test(source) && /systemAudio\(\s*["']\/stop["']/.test(source));
 	check("migrated clip flow writes through inputActions.insertText", /inputActions\.insertText\(/.test(source));
 
@@ -570,6 +575,63 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 		sensitivityError = String(failure?.message ?? failure);
 	}
 	check("settings panel offers a question sensitivity picker (strict / standard / high)", sensitivityError === "", sensitivityError);
+
+	// 渲染级：「立即回答」按钮在面板里，点一下就 POST /interview/answer-now
+	// （宿主会立刻结束当前采集段并投递，不等静音判定）。
+	let answerNowError = "";
+	try {
+		const node = innerNode(main.component({ t: (k) => k, sessionId: "session-abc" }));
+		const buttons = [];
+		const walk = (current) => {
+			if (current === null || current === undefined || typeof current !== "object") return;
+			if (current.type === "button") buttons.push(current);
+			const children = Array.isArray(current.props?.children) ? current.props.children : [current.props?.children];
+			for (const child of children) walk(child);
+		};
+		walk(node);
+		const button = buttons.find((item) => item.props?.children === "Answer now");
+		if (button === undefined) answerNowError = `no answer-now button among ${buttons.length} button(s)`;
+		else if (button.props?.disabled === true) answerNowError = "answer-now button is disabled while idle";
+		else {
+			button.props.onClick();
+			await sleep(0);
+			if (!fetchCalls.some((call) => call.url.includes("/interview/answer-now"))) {
+				answerNowError = "clicking answer-now did not POST /interview/answer-now";
+			}
+		}
+	} catch (failure) {
+		answerNowError = String(failure?.message ?? failure);
+	}
+	check("panel offers an answer-now button that flushes the live segment", answerNowError === "", answerNowError);
+
+	// 渲染级：「长回答」按钮挨着补答/立即回答，点了带片段原文 POST /interview/answer-long
+	// （宿主会要求同一个问题按 5 分钟口读的细节长版本重答一遍）。
+	let answerLongError = "";
+	try {
+		const node = innerNode(main.component({ t: (k) => k, sessionId: "session-abc" }));
+		const buttons = [];
+		const walk = (current) => {
+			if (current === null || current === undefined || typeof current !== "object") return;
+			if (current.type === "button") buttons.push(current);
+			const children = Array.isArray(current.props?.children) ? current.props.children : [current.props?.children];
+			for (const child of children) walk(child);
+		};
+		walk(node);
+		const button = buttons.find((item) => item.props?.children === "Long answer");
+		if (button === undefined) answerLongError = `no long-answer button among ${buttons.length} button(s)`;
+		else {
+			button.props.onClick();
+			await sleep(0);
+			const call = fetchCalls.find((item) => item.url.includes("/interview/answer-long"));
+			if (call === undefined) answerLongError = "clicking long-answer did not POST /interview/answer-long";
+			else if (call.init?.body !== undefined && !String(call.init.body).includes("sessionId")) {
+				answerLongError = `long-answer body has no sessionId: ${String(call.init.body)}`;
+			}
+		}
+	} catch (failure) {
+		answerLongError = String(failure?.message ?? failure);
+	}
+	check("panel offers a long-answer button next to the answer buttons", answerLongError === "", answerLongError);
 
 	// A profile without DSH-better-sidebar must still work: no tab type, and the
 	// left panel falls back to the full surface so nothing becomes unreachable.

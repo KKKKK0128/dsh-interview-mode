@@ -1,12 +1,16 @@
-# dsh-interview-mode - live check for question-detection sensitivity.
+﻿# dsh-interview-mode - live check for question-detection sensitivity.
 # Plays three short clips (statement / weak-hint sentence / particle question)
 # once per preset (strict, standard, high) and prints the engine's judgement.
 # Run with Windows PowerShell 5.1 (SAPI voices); the script itself stays ASCII,
 # the Chinese sentences live in .sens-lines.txt (UTF-8).
 #   powershell.exe -NoProfile -File .test\live-sensitivity.ps1
+# The DSH port changes between restarts: pass -Base with the current GUI URL when
+# 19387 is not it (e.g. -Base http://127.0.0.1:55475/interview).
+
+param([string]$Base = 'http://127.0.0.1:19387/interview')
 
 $ErrorActionPreference = 'Stop'
-$base = 'http://127.0.0.1:19387/interview'
+$base = $Base.TrimEnd('/')
 $dir = Join-Path $PSScriptRoot 'live-sens'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 

@@ -1,6 +1,10 @@
-# 模拟面试模式 · 详细方案（v1.6）
+# 模拟面试模式 · 详细方案（v1.8）
 
 > 交付范围：**只出方案，不动代码**（按你的选择）。本文所有 DSH 接口签名均已通过 `cordis_inspect_query` 核对；标注「待 P0 验证」的条目是尚未在运行时确认的假设。
+>
+> **v1.8 修订（2026-10-17，已落地）**：答案长度改成**按口读时间**约束——模式提示词的默认长度从「中文 120–250 字 / 英文 80–160 词」改为中文 **500–800 字**（口读约 2.5–4 分钟；硬上限 1200 字 ≈ 5 分钟）、英文约 300–500 词（硬上限约 750 词），并要求每个要点给细节（数字、取舍、踩过的坑）而不是堆形容词。新增**长回答**：`POST /interview/answer-long {text?}` + 面板「**长回答**」按钮（紧挨着「补答」，每条转写片段后面一个，实时区/主面板按钮行各一个），消息以新标记 `[模拟面试·长回答请求]` 开头（`LONG_TAG` / `LONG_NOTE` / `formatLongAnswer()`），要求中文 1000–1200 字（英文约 650–750 词）的细节描述型长版本，结构固定「结论 → 背景与目标 → 方案与关键细节 → 结果与收尾」；和补答一样**不看提问判定、不去重**（同一道题可以先短答、再点长回答展开），缺省 `text` 时用最近缓冲区，空缓冲区报「最近没有可长答的内容」。涉修订章节：§1、§6.4、§6.6、§6.7、§8。
+>
+> **v1.7 修订（2026-10-17，已落地）**：针对「面试官提问中间会有短暂停顿」与「话已经在转写了却还没被判定」两种现场情况——① 静音判停默认 `silenceMs` **700 → 1000 ms**（只是「略微延长」，切段上限仍由 `maxSegmentMs` 兜底）；② 新增**立即回答**：`POST /interview/answer-now` + 面板「立即回答」按钮 + 页面热键 **Ctrl+Shift+U**，立刻结束当前正在采集的那一段并直接投递，不等静音、不看像不像提问，`minQuestionChars`/`minPeakRms` 也让路（只保留去重）；正在转写/判定中的段会被标 `manual:true`、`reason:'manual'` 后照投；不在监听时降级为「补答最近内容」。`GET /interview/status` 新增 `inflight:{ recording, seconds, transcribing, answering }`（空闲 `null`）给面板显示「录音中 x.xs / 正在转写…」并点亮按钮。保护：强制路径仍要求音频 ≥0.2 s（`reason:'nothing-heard'`），等待上限 12 s（`reason:'timeout'`），停止监听以 `reason:'stopped'` 收尾。涉修订章节：§6.2、§6.4、§6.6、§6.7、§8。
 >
 > **v1.6 修订（2026-10-17，已落地）**：提高**提问判定灵敏度**——`looksLikeQuestion(text, sensitivity)` 分成三档：`strict`（只认疑问线索，等价旧行为）/ `standard`（默认，追加结尾「吗/呢/么」）/ `high`（再追加弱话题名词、请求式开头）；强线索词表扩到 60+ 条（`多大`/`多长时间`/`讲一下`/`聊一聊`/`评价`/`做过`…），`minQuestionChars` 默认 **6 → 4**；新增 `settings.questionSensitivity` 与主面板下拉框；`high` 档由引擎把**紧跟在提问后面的短句**（≤20 字、10 秒内、上一段本身不是兜底捞上来的）当追问投递（`segment.promoted:'follow-up'`）。取向仍是「宁可多报也不漏报」。涉修订章节：§6.4、§8。
 >
@@ -22,7 +26,7 @@
 
 1. 实时采集**电脑播放的声音**（面试官语音，WASAPI 环回，非麦克风）；
 2. 本地转写 → 判定「这是一句提问」；
-3. **自动**把该提问投递到当前会话，由会话里的 Agent 直接给出可照读的简短回答（聊天消息形式）；
+3. **自动**把该提问投递到当前会话，由会话里的 Agent 直接给出可照读的回答（聊天消息形式；默认中文 500–800 字 ≈ 2.5–4 分钟口读、上限约 1200 字，v1.8 起按口读时间而非固定字数约束）；
 4. 识别漏了 / 答得不好时，按**热键强制补答**（对最近一段音频再次提问）。
 
 已确认的六个决策：
@@ -75,6 +79,9 @@
         ↓
 ⑦ 没答 / 答偏 → 按热键（默认 Ctrl+Shift+I）→ 对最近 ≤30 s 音频立刻再投一次
         （面板里也有「补答最近一段」按钮，等价）
+        ↓
+⑧ 面试官说完停住、或在等它判停 → 按 Ctrl+Shift+U（或点面板「立即回答」）
+        → 结束当前正在采的这一段并立刻投递，不等静音、不管像不像提问
 ```
 
 ---
@@ -92,7 +99,7 @@
 │    agentPresets.register({ id:'mock-interview', … })                 │
 │    systemPrompt.section({ name:'interview-mode', … })                │
 │    分段引擎（状态机）──> 问题判定 ──> 投递器 ──> sessionController.prompt()│
-│    HTTP 路由（给前端）：/interview/{start,stop,status,answer-last}    │
+│    HTTP 路由（给前端）：/interview/{start,stop,status,answer-last,answer-now}│
 └──────────────────────────────────────────────────────────────────────┘
                     ▲ fetch                    │ prompt 注入
                     │                          ▼
@@ -166,7 +173,8 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 ```
 
 - 实现方式：**循环 start/stop**（复用已验证的 `silenceMs` 自动停止），而不是新写流式 VAD —— 风险最低；
-- 每段参数：`silenceMs=700`、`minSpeechMs=800`（电平阈值判定，低于则丢弃，防咳嗽/键盘声）、`maxSegmentMs=30000`（硬上限）、段间冷却 `cooldownMs=300`；
+- 每段参数：`silenceMs=1000`（v1.7 起，原来 700——提问中间的思考停顿常达 0.5–1 s，700 ms 会把一句话切成两段）、`minSpeechMs=800`（电平阈值判定，低于则丢弃，防咳嗽/键盘声）、`maxSegmentMs=30000`（硬上限）、段间冷却 `cooldownMs=300`；
+- **手动收尾（v1.7）**：`answerNow()` 可以在采集途中叫停当前段并强制投递（`session.stop()` → 走完转写 → 标 `manual:true`），采集与转写的相位由 `status.inflight` 对外可见；
 - **滚动缓冲**：最近 ≤30 s 的段落转写保存在环形缓冲里，供热键补答；
 - **去重**：与上一段文本相似度 ≥0.9 且间隔 <10 s 的片段丢弃（防回声/重复触发）；
 - **监听中的可见性**（v1.1 改到侧边栏）：侧边栏图标画红点/脉冲 + 主面板顶部显示「监听中 · 当前电平 · 最近一句」。**不使用** `shell.overlay`，也不在输入框区插任何东西。
@@ -192,6 +200,8 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 - **自动投递**：判定命中即投；同一文本 10 s 内只投一次；
 - **知识库（v1.5）**：若 `settings.knowledgeBase` 非空，投递时把 `collectKnowledge()` 的 `block`（带 `[知识库]` 标记、来源路径、`--- 相对路径 ---` 分隔的正文）追加在提问文本之后；资料在宿主侧读盘并做 5 分钟热缓存，面板通过 `GET /interview/knowledge` 只看摘要，正文不下发。
 - **热键补答**：`POST /interview/answer-last` → 取滚动缓冲最近 ≤30 s → 投递，格式为 `[模拟面试·补答请求] …`（侧边栏面板里的「补答最近一段」按钮走同一条路径）；
+- **立即回答（v1.7）**：`POST /interview/answer-now`（面板按钮 / `Ctrl+Shift+U`）→ `engine.answerNow()`：正在采集时以 `session.stop()` 提前收尾，该段标 `manual:true`、`reason:'manual'`，并**绕过提问判定与 `minQuestionChars`/`minPeakRms`**（去重保留）直接投递，投递走的就是普通提问路径（`[模拟面试·面试官提问] …` + 知识库段），所以回答 Agent 的行为与自动投递完全一致；音频短于 0.2 s 回 `reason:'nothing-heard'`，12 s 未赶上转写回 `reason:'timeout'`，停止监听回 `reason:'stopped'`，不在监听时降级到 `answer-last`。段对象上带 `manual` 字段，`status.inflight` 暴露 `{ recording, seconds, transcribing, answering }` 供面板显示与按钮点亮。
+- **长回答（v1.8）**：`POST /interview/answer-long {text?}`（面板「长回答」按钮，紧挨「补答」）→ `engine.answerLong(text)`：`text` 省略时取最近 `maxBufferSeconds` 的缓冲区内容，投递格式为 `[模拟面试·长回答请求] …`（`LONG_TAG`，附 `LONG_NOTE` 说明这是 5 分钟口读的细节长版本）。与补答同路：**不看提问判定、不去重、不看 `minQuestionChars`**，所以同一道题可以先短答、再点「长回答」展开一次；缓冲为空时报「最近没有可长答的内容」。片段列表里每条后面的按钮传的是**该条原文**，实时区/主面板按钮行传空（用缓冲区）。
 - **忙时策略**（关键）：若 `sessionController.list()` 里本会话 `running === true`（Agent 正在回答上一问），则：
   - 默认 `mode:'queue'` 排队，避免打断；
   - 若排队积压 ≥2 条，只保留最新一条（丢弃过期提问，避免答非所问的雪崩）；
@@ -203,13 +213,14 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 ```text
 你是「模拟面试模式」里的面试副手。
 
-当收到以 [模拟面试·面试官提问] 或 [模拟面试·补答请求] 开头的消息时：
-1. 立刻给出**可直接照读**的口语化中文回答，长度 120–250 字；
-2. 结构：先一句结论/定义，再 2–3 个要点，必要时补一个例子或数字；
+当收到以 [模拟面试·面试官提问]、[模拟面试·补答请求] 或 [模拟面试·长回答请求] 开头的消息时：
+1. 立刻给出**可直接照读**的口语化回答：中文提问用中文，长度 500–800 字（口读约 2.5–4 分钟；硬上限 1200 字 ≈ 5 分钟）；英文提问用英文，约 300–500 词（硬上限约 750 词）；
+2. 结构：先一句结论/定义，再 2–4 个要点，每个要点都给细节（数字、取舍、踩过的坑），必要时补一个例子；
 3. 不要复述问题，不要寒暄，不要「好的/当然可以」这类开场；
 4. 不要调用工具、不要反问、不要要求澄清；信息不足时按最合理的常识假设作答；
 5. 技术问题优先给：定义 → 原理/流程 → 常见坑 → 一句话总结；
-6. 若同一条提问与上文高度重复，用一句话补充差异点即可。
+6. 若同一条提问与上文高度重复，用一句话补充差异点即可；
+7. 若以 [模拟面试·长回答请求] 开头：给细节描述型的长版本，按 5 分钟口读准备——中文 1000–1200 字、英文约 650–750 词；结构固定为「结论 → 背景与目标 → 方案与关键细节（数字、取舍、失败与修复）→ 结果与一句话收尾」；比短版本多出来的是过程与细节，不是形容词。
 
 除以上消息外，保持正常的编程助手行为。
 ```
@@ -249,15 +260,16 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 | 位置 | 内容 |
 | --- | --- |
 | `sidebar.panellist` | 注册 `{ id:'interview', order:40, label:() => t('模拟面试') }`；图标组件自己画状态：空闲灰、监听中加红点/脉冲（ownerProps 只给 `size`/`active`，状态灯由本插件组件渲染）。点击后由 shell 切到 `main` 的同名 key。 |
-| `main` key `'interview'` | **主面板（整栏）**：① 开始/停止监听 + 状态灯；② 输出设备选择（复用 `/system-audio/devices`）；③ 实时电平条 + 最近一句转写；④ 最近片段列表（时间 / 文本 / 是否已投递 / 「补答」/「复制」）；⑤ 关键配置（自动回答、显示热键、静音阈值）；⑥ 未选会话时的提示。 |
+| `main` key `'interview'` | **主面板（整栏）**：① 开始/停止监听 + 状态灯；② 输出设备选择（复用 `/system-audio/devices`）；③ 实时电平条 + 最近一句转写；④ 最近片段列表（时间 / 文本 / 是否已投递 / 「补答」/「长回答」/「复制」）；⑤ 关键配置（自动回答、显示热键、静音阈值）；⑥ 未选会话时的提示。 |
 | **会话对话区** | **问答就在这里**：`[模拟面试·面试官提问] …` 与 Agent 的回答都是普通聊天消息，无需额外 UI。 |
 | 输入框区（`conversation.input.*`） | **零改动**：本模式不放任何控件（按你的要求）。 |
-| 热键 | `Ctrl+Shift+I` 强制补答（文档级 `keydown`，卸载时注销）。 |
+| 热键 | `Ctrl+Shift+I` 强制补答；`Ctrl+Shift+U` 立即回答当前段（v1.7）。都是文档级 `keydown`，卸载时注销。 |
+| 「长回答」按钮（v1.8） | 紧挨「补答」/「立即回答」渲染：片段列表里每条后面一个（传该条原文），实时区与主面板按钮行各一个（用最近缓冲区）。走 `POST /interview/answer-long`。 |
 
 **主面板的两个实现要点**：
 
 1. **面板不绑定会话** ⇒ 面板必须自己记住「当前会话」：客户端用 `useSessions()`（或 `sessions` 服务的 `using/scope/binding`）拿当前会话 id，作为 `sessionController.prompt` 的 `sessionId`；没有会话时面板显示「请先打开一个会话」并禁用投递。切换会话时面板内容不变（它是全局面板），但投递目标跟着变。
-2. 面板状态来自本插件自己的 HTTP 路由 `/interview/*`（`status/start/stop/answer-last`），与 `dsh-system-audio` 的 `/system-audio/*` 分工明确：前者管模式与投递，后者管采集与转写。
+2. 面板状态来自本插件自己的 HTTP 路由 `/interview/*`（`status/start/stop/answer-last/answer-now`；v1.7 起 `status` 还会回报 `inflight`，面板据此显示「录音中 x.xs / 正在转写…」并把「立即回答」按钮点亮），与 `dsh-system-audio` 的 `/system-audio/*` 分工明确：前者管模式与投递，后者管采集与转写。
 
 **与现有 `dsh-system-audio` 按钮的关系**：它在 `conversation.input.left` 的录音按钮**保持不变**（独立插件的通用能力，不属于本模式 UI）。如果你希望它也一并挪进这个侧边栏面板，我可以在 P2 顺带做（见 §10 第 6 条）。
 
@@ -271,12 +283,16 @@ knowledgeBase: ''       # 当前选中的资料文件夹/文件；'' = 不使用
 knowledgeList: []       # 面板保存过的候选路径（最多 20 条，下拉框选项）（v1.5）
 autoStart: false        # 打开会话就自动开始监听
 autoAnswer: true        # 自动投递（决策 2）
-silenceMs: 700          # 静音判停
+silenceMs: 1000         # 静音判停（v1.7 从 700 放宽，容许提问中的短暂停顿）
 minSpeechMs: 800        # 最短语音
 maxSegmentMs: 30000     # 单段硬上限
 cooldownMs: 300
 dupSimilarity: 0.9      # 去重阈值
-hotkey: 'Ctrl+Shift+I'
+minQuestionChars: 4     # 归一化后短于此长度的段不投递（v1.6 从 6 调低；立即回答时让路）
+questionSensitivity: standard  # strict / standard / high（v1.6）
+answerLength: 500-800    # 中文默认答案长度（字）；长回答 1000–1200（v1.8，写死在提示词里）
+hotkey: 'Ctrl+Shift+I'  # 补答最近一句
+hotkeyAnswerNow: 'Ctrl+Shift+U'  # 立即回答当前段（v1.7，页面内固定键位）
 interruptWhenBusy: false# 忙时是否打断
 llmGate: false          # 是否用 LLM 二次判定
 language: auto          # 转写语言
@@ -310,6 +326,8 @@ panelOrder: 40          # 侧边栏图标位置
    - 英文识别（v1.4）：`detectLanguage` 中英判定、英文提问线索、显式 `en` 不重转、`auto` 下英文重转一次并保留英文结果；
    - 知识库（v1.5）：路径规范化/去重限量、目录扫描的包含与排除（`node_modules`、隐藏文件、超深目录、超大文件、空文件、不支持格式）、体积截断与总预算、**两遍遴选（先抽正文，再按正文从小到大装预算）**、`.docx` 只受 8 MB 原始体积粗筛、内联块结构、投递消息带 `[知识库]` 段、`start()` 清空上一轮片段（`.test/knowledge-check.mjs` + engine/host/client 三套 battery）。
    - 提问灵敏度（v1.6）：三档分类正确率（语气词、新增线索词、弱话题词/请求式开头）、未知档位回落 `standard`、`configure` 只接受三个已知档位、`high` 档追问兜底确实投递且长陈述仍不投递、`standard` 档不做兜底；`POST /interview/config` 的灵敏度夹取（host battery）。
+   - 逐段收尾与立即回答（v1.7）：`.test/live-answer-now.ps1` 把同一段长陈述播两轮（正常播完 vs 播到一半 `answer-now`），投递目标设成不存在的会话 id 以免真投递；期望第一轮 `reason:'not-a-question'`、第二轮 `manual:true` 且有转写文本。离线 battery 覆盖：`silenceMs` 默认 1000；`status.inflight` 在采集/转写两相都能报出并含秒数；`answerNow()` 打断正在采的段、把长陈述也强制投递（`manual:true`、`reason:'manual'`、走 `[模拟面试·面试官提问]` 通道）；极短音频（<0.2 s）不投并回 `reason:'nothing-heard'`；空闲时降级为 `answer-last`；等待上限 12 s 超时收尾；`POST /interview/answer-now` 空闲时以 500 + 明确错误返回（host battery）；面板「立即回答」按钮与 `Ctrl+Shift+U` 热键（client battery）。
+   - 长回答（v1.8）：`answerLong(text)` 用 `[模拟面试·长回答请求]` 标记重投、绕过去重与 `minQuestionChars`、`lastDelivery.kind === 'long'`；省略 `text` 时取最近缓冲区；缓冲为空时明确报错；`POST /interview/answer-long` 带/不带 `text` 的两条路径（host battery）；面板「长回答」按钮渲染与 POST body（client battery）。
 2. **线上 E2E**（真实应用 + TTS 音频）：用 SAPI 生成已知中文提问（已有 `speech-zh.wav` 同类脚本）→ 播放 → 期望**对话里**出现 `[模拟面试·面试官提问] 已知文本` + Agent 回答；跑 3 轮。
    - 提问灵敏度（v1.6）：`.test/live-sensitivity.ps1` 用 SAPI 合成三段（纯陈述 / 弱话题名词句 / 语气词提问），在 `strict`/`standard`/`high` 三档各环回播一轮，`targetSessionId` 故意设成不存在的 id 以免真投递。2026-10-17 实测：纯陈述三档都判陈述（无新增误报）；弱话题名词句在 strict/standard 丢弃、high 判提问；语气词句三档都判提问（SenseVoice 自动补了问号，故 strict 与 standard 在真实音频上差异很小，增益主要来自 high 档与 `minQuestionChars` 6→4）。
 3. **UI 验收**：`client/Slots.listSubTree {root:'sidebar.panellist'}` 出现 `interview`（order 40），`{root:'main'}` 出现 key `interview`；点图标能进/出面板；面板里开始/停止监听生效；侧边栏折叠（rail）时图标仍可用。
@@ -339,7 +357,7 @@ panelOrder: 40          # 侧边栏图标位置
 1. **热键**：`Ctrl+Shift+I` 可以吗？
 2. **忙时**：Agent 正在回答上一问时，新提问**排队**（默认）还是**打断重答**？
 3. **自动开始**：进入模式就自动开监听，还是每次都到侧边栏面板点一下「开始监听」？
-4. **回答风格**：120–250 字、先结论后要点（当前草案），是否符合你的面试场景？（也可换成「30 秒口播稿」或「要点提纲」）
+4. **回答风格**：默认按**口读时间**约束——中文 500–800 字（≈2.5–4 分钟口读，硬上限 1200 字 ≈ 5 分钟）、英文 300–500 词，要点里给数字与取舍；同一道题想再展开一遍时点「**长回答**」（v1.8，中文 1000–1200 字 ≈ 5 分钟）。觉得还是太短/太长，改 `lib/prompt.js` 的 `INTERVIEW_PROMPT` 与 `LONG_NOTE` 即可。
 5. **侧边栏图标位置**：排在 `mnemon` 之后（`order: 40`）可以吗？
 6. 现有 `dsh-system-audio` 在输入框里的录音按钮，要不要**一起挪进**这个侧边栏面板？（默认不动）
 7. 确认后从 **P0 spike** 开始动代码。
@@ -349,5 +367,5 @@ panelOrder: 40          # 侧边栏图标位置
 ## 附：涉及文件
 
 - 现有：`dsh-system-audio\`（`lib/index.js`、`lib/routes.js`、`lib/speech.js`、`lib/recorder.js`、`lib/client.js`、`native\LoopbackRecorder.exe`、`.test\`）
-- 新增（待建）：`dsh-interview-mode\`（`package.json`、`lib/index.js`、`lib/engine.js`、`lib/routes.js`、`lib/prompt.js`、`lib/knowledge.js`、`lib/client.js`、`.test\`）
+- 本插件（已落地）：`dsh-interview-mode\`（`package.json`、`cordis.patch.yml`、`lib/index.js`、`lib/engine.js`、`lib/routes.js`、`lib/prompt.js`、`lib/knowledge.js`、`lib/client.js`、`.test\*.mjs` 离线 battery、`.test\live-*.ps1` 现场脚本）
 - 参考：DSH Inspect 查询输出（`host/Service.listService`、`client/Slots.listSubTree{root:'sidebar'|'sidebar.panellist'|'main'}`），用于核对上表签名与槽位

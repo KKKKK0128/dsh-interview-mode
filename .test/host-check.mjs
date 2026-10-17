@@ -147,7 +147,7 @@ await sleep(20)
 
 check('挂上了全部 /interview/* 路由', () => {
   const paths = [...routes.keys()].filter((key) => key.startsWith('exact /interview/')).map((key) => key.slice(6))
-  const expected = ['/interview/ping', '/interview/status', '/interview/sessions', '/interview/devices', '/interview/knowledge', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/config']
+  const expected = ['/interview/ping', '/interview/status', '/interview/sessions', '/interview/devices', '/interview/knowledge', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/answer-now', '/interview/answer-long', '/interview/config']
   for (const path of expected) assert(paths.includes(path), `missing route ${path}（已注册：${paths.join(', ')}）`)
 })
 
@@ -230,6 +230,29 @@ console.log('路由行为（空闲态）')
     assert.equal(stop.response.statusCode, 200, `status ${stop.response.statusCode}: ${stop.response.body}`)
     assert.equal(stop.json?.ok, true)
     assert.equal(stop.json?.state, 'idle')
+  })
+
+  const answerNow = await callRoute('POST', '/interview/answer-now', {})
+  check('空闲态 POST /interview/answer-now → 退化成补答并明确报错', () => {
+    assert.equal(answerNow.response.statusCode, 500, `status ${answerNow.response.statusCode}: ${answerNow.response.body}`)
+    assert.equal(answerNow.json?.ok, false)
+    assert.match(String(answerNow.json?.error ?? ''), /最近没有可补答的内容/)
+  })
+
+  const answerLongEmpty = await callRoute('POST', '/interview/answer-long', {})
+  check('空闲态 POST /interview/answer-long（不带 text）→ 缓冲为空则报错', () => {
+    assert.equal(answerLongEmpty.response.statusCode, 500, `status ${answerLongEmpty.response.statusCode}: ${answerLongEmpty.response.body}`)
+    assert.equal(answerLongEmpty.json?.ok, false)
+    assert.match(String(answerLongEmpty.json?.error ?? ''), /最近没有可长答的内容/)
+  })
+
+  const answerLong = await callRoute('POST', '/interview/answer-long', { text: '项目的难点在哪里' })
+  check('POST /interview/answer-long → 指定片段按长回答投递', () => {
+    assert.equal(answerLong.response.statusCode, 200, `status ${answerLong.response.statusCode}: ${answerLong.response.body}`)
+    assert.equal(answerLong.json?.ok, true)
+    assert.equal(answerLong.json?.delivered, true)
+    assert.equal(answerLong.json?.text, '项目的难点在哪里')
+    assert.equal(answerLong.json?.sessionId, 's-1')
   })
 }
 

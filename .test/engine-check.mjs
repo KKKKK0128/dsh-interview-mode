@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { InterviewEngine, isSessionRunning, pickSessionId, sessionTitle } from '../lib/engine.js'
 import {
   FOLLOWUP_TAG,
+  LONG_TAG,
   QUESTION_TAG,
   detectLanguage,
   looksLikeQuestion,
@@ -662,6 +663,180 @@ console.log('提问灵敏度（strict / standard / high）')
     assert.equal(follower.reason, 'not-a-question')
   })
   await engine.stop()
+}
+
+console.log('立即回答（结束当前采集段并立即投递）')
+{
+  // 采集器一直不自己结束（模拟「面试官还在说 / 刚说完、静音判定还没到」），
+  // 只有 stop()（＝ answerNow 发出的收尾请求）才会让它结束。
+  function makeOpenCapture(seconds) {
+    const state = { started: 0, stopped: 0 }
+    const capture = {
+      state,
+      startCaptureAuto: async () => {
+        state.started += 1
+        let settle = () => {}
+        const settled = new Promise((resolve) => { settle = resolve })
+        const levels = [{ t: 0.1, rms: 0.06, db: -24 }, { t: 0.3, rms: 0.05, db: -26 }]
+        return {
+          levels,
+          settled,
+          lastLevel: () => levels[levels.length - 1],
+          stop: async () => {
+            state.stopped += 1
+            settle()
+          },
+          kill: () => {},
+          stdio: 'pipes',
+        }
+      },
+      finishCapture: async () => ({ seconds, peak: 0.18, rms: 0.05, path: 'C:\\fake\\open.wav', stream: false }),
+      captureWaveBytes: async () => Buffer.from('RIFF____WAVE'),
+      discardCapture: () => {},
+      listDevices: async () => ({ default: 'fake', devices: [] }),
+    }
+    return capture
+  }
+
+  const capture = makeOpenCapture(1.4)
+  const records = []
+  const engine = new InterviewEngine({
+    capture,
+    // 这句是陈述句：正常路径下会被 'not-a-question' 丢掉，只有「立即回答」才投递。
+    speech: makeSpeech(['我本科是应用物理专业']),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, silenceMs: 3000 },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.status().inflight !== null)
+  check('采集中 status 报出正在录的这一段', () => {
+    const inflight = engine.status().inflight
+    assert.notEqual(inflight, null)
+    assert.equal(inflight.recording, true)
+    assert.equal(typeof inflight.seconds, 'number')
+    assert.equal(inflight.transcribing, false)
+    assert.equal(inflight.answering, false)
+  })
+  await checkAsync('answerNow 提前收尾并立即投递（不看提问判定）', async () => {
+    const result = await engine.answerNow()
+    assert.equal(result.delivered, true, JSON.stringify(result))
+    assert.equal(result.text, '我本科是应用物理专业')
+    assert.ok(capture.state.stopped >= 1, '应当请求采集器收尾')
+    assert.equal(records.length, 1)
+    assert.ok(records[0].content[0].text.startsWith(QUESTION_TAG), records[0].content[0].text)
+    assert.equal(records[0].sessionId, 's-target')
+    const segment = engine.segments[0]
+    assert.equal(segment.manual, true)
+    assert.equal(segment.isQuestion, true)
+    assert.equal(segment.delivered, true)
+    assert.equal(segment.reason, 'delivered')
+  })
+  check('这一段进入记录列表（面板能回看）', () => {
+    assert.equal(engine.segments.length, 1)
+    assert.equal(engine.status().segments[0].text, '我本科是应用物理专业')
+  })
+  await engine.stop()
+}
+
+{
+  // 极短音频（明显误触）仍然不投递，并明确告诉面板「没听到」。
+  const capture = {
+    startCaptureAuto: async () => {
+      let settle = () => {}
+      const settled = new Promise((resolve) => { settle = resolve })
+      const levels = [{ t: 0.05, rms: 0.02, db: -34 }]
+      return { levels, settled, lastLevel: () => levels[0], stop: async () => settle(), kill: () => {}, stdio: 'pipes' }
+    },
+    finishCapture: async () => ({ seconds: 0.05, peak: 0.02, rms: 0.02, path: 'C:\\fake\\short.wav', stream: false }),
+    captureWaveBytes: async () => Buffer.from('RIFF____WAVE'),
+    discardCapture: () => {},
+    listDevices: async () => ({ default: 'fake', devices: [] }),
+  }
+  const records = []
+  const engine = new InterviewEngine({
+    capture,
+    speech: makeSpeech(['这一句不该出现']),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, silenceMs: 3000 },
+  })
+  await engine.start()
+  await waitFor(() => engine.status().inflight !== null)
+  await checkAsync('误触级的超短音频不投递（reason nothing-heard）', async () => {
+    const result = await engine.answerNow()
+    assert.equal(result.delivered, false)
+    assert.equal(result.reason, 'nothing-heard')
+    assert.equal(records.length, 0)
+  })
+  await engine.stop()
+}
+
+{
+  // 没在监听时 answerNow 退化成 answerLast（缓冲为空则明确报错）。
+  const engine = new InterviewEngine({
+    capture: makeCapture([]),
+    speech: makeSpeech([]),
+    speechService: () => ({}),
+    sessionController: () => makeSessions([]),
+    settings: { cooldownMs: 10 },
+  })
+  await checkAsync('空闲时 answerNow 退化成补答：缓冲为空则报错', async () => {
+    await assert.rejects(() => engine.answerNow(), /最近没有可补答的内容/)
+  })
+}
+
+console.log('长回答（细节描述型的长版本）')
+{
+  // 同一条提问先自动短答、再点「长回答」：第二次必须换成长回答标记，且不被去重拦掉。
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: '请介绍一下你的项目', seconds: 1.2, peak: 0.2 }]),
+    speech: makeSpeech(['请介绍一下你的项目']),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, minQuestionChars: 4, dupWindowMs: 10000 },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.delivered === 1)
+  await checkAsync('answerLong 用长回答标记重投同一段，且绕过去重', async () => {
+    const result = await engine.answerLong(engine.segments[0].text)
+    assert.equal(result.delivered, true, JSON.stringify(result))
+    assert.equal(records.length, 2)
+    assert.ok(records[0].content[0].text.startsWith(QUESTION_TAG), records[0].content[0].text)
+    assert.ok(records[1].content[0].text.startsWith(LONG_TAG), records[1].content[0].text)
+    assert.ok(records[1].content[0].text.includes('5 分钟口读'), records[1].content[0].text)
+    assert.equal(engine.lastDelivery.kind, 'long')
+    assert.equal(engine.dropped, 0)
+  })
+  await checkAsync('answerLong 缺省用最近缓冲区内容', async () => {
+    const result = await engine.answerLong()
+    assert.equal(result.text, '请介绍一下你的项目')
+    assert.equal(result.delivered, true)
+    assert.equal(records.length, 3)
+  })
+  await engine.stop()
+}
+
+{
+  // 指定片段长答时不受 minQuestionChars 限制（用户明确点了这一条）。
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture([]),
+    speech: makeSpeech([]),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, minQuestionChars: 20 },
+  })
+  await checkAsync('answerLong 不看长度闸（用户明确指定片段）', async () => {
+    const result = await engine.answerLong('项目难点')
+    assert.equal(result.delivered, true)
+    assert.equal(records.length, 1)
+    assert.ok(records[0].content[0].text.startsWith(LONG_TAG), records[0].content[0].text)
+  })
+  await checkAsync('缓冲为空时 answerLong 明确报错', async () => {
+    await assert.rejects(() => engine.answerLong(), /最近没有可长答的内容/)
+  })
 }
 
 console.log(`\n${failed === 0 ? 'ALL ENGINE CHECKS PASSED' : 'ENGINE CHECKS FAILED'}  (passed ${passed}, failed ${failed})`)
