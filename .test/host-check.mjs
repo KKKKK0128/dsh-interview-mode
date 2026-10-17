@@ -188,12 +188,18 @@ console.log('路由行为（空闲态）')
     assert.equal(status.json?.settings?.hotkey, 'Ctrl+Shift+I')
   })
 
-  const config = await callRoute('POST', '/interview/config', { autoAnswer: false, silenceMs: 5000 })
+  const config = await callRoute('POST', '/interview/config', { autoAnswer: false, silenceMs: 5000, questionSensitivity: 'high' })
   check('POST /interview/config → 回读设置', () => {
     assert.equal(config.response.statusCode, 200, `status ${config.response.statusCode}: ${config.response.body}`)
     assert.equal(config.json?.ok, true)
     assert.equal(config.json?.settings?.autoAnswer, false)
     assert.equal(config.json?.settings?.silenceMs, 5000)
+    assert.equal(config.json?.settings?.questionSensitivity, 'high')
+  })
+  const badConfig = await callRoute('POST', '/interview/config', { questionSensitivity: 'banana' })
+  check('POST /interview/config → 未知灵敏度档位被忽略', () => {
+    assert.equal(badConfig.response.statusCode, 200, `status ${badConfig.response.statusCode}: ${badConfig.response.body}`)
+    assert.equal(badConfig.json?.settings?.questionSensitivity, 'high')
   })
 
   const sessions = await callRoute('GET', '/interview/sessions')

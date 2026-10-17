@@ -538,6 +538,39 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 	}
 	check("settings panel offers a knowledge base picker that pins the inlined material", knowledgeError === "", knowledgeError);
 
+	// 渲染级：提问灵敏度下拉框（strict / standard / high），改档同样经防抖写回宿主。
+	let sensitivityError = "";
+	try {
+		const node = innerNode(main.component({ t: (k) => k, sessionId: "session-abc" }));
+		const selects = [];
+		const walk = (current) => {
+			if (current === null || current === undefined || typeof current !== "object") return;
+			if (current.type === "select") selects.push(current);
+			const children = Array.isArray(current.props?.children) ? current.props.children : [current.props?.children];
+			for (const child of children) walk(child);
+		};
+		walk(node);
+		const optionsOf = (item) => (Array.isArray(item.props?.children) ? item.props.children : [item.props?.children]);
+		const picker = selects.find((item) => optionsOf(item).some((option) => option?.props?.children === "High (topic words + follow-up catch, may over-report)"));
+		const values = picker === undefined ? [] : optionsOf(picker).map((option) => option?.props?.value);
+		if (picker === undefined) sensitivityError = `no sensitivity select among ${selects.length} select(s)`;
+		else if (values.join(",") !== "strict,standard,high") sensitivityError = `options=${values.join(",")}`;
+		else if (picker.props.value !== "standard") sensitivityError = `initial value=${String(picker.props.value)}`;
+		else {
+			picker.props.onChange({ target: { value: "high" } });
+			for (const timer of timers.splice(0)) timer.fn();
+			await sleep(0);
+			const posted = fetchCalls.filter((call) => call.url.includes("/interview/config"));
+			if (posted.length === 0) sensitivityError = "changing sensitivity did not POST /interview/config";
+			else if (!String(posted.at(-1).init?.body ?? "").includes('"questionSensitivity":"high"')) {
+				sensitivityError = `body=${String(posted.at(-1).init?.body ?? "")}`;
+			}
+		}
+	} catch (failure) {
+		sensitivityError = String(failure?.message ?? failure);
+	}
+	check("settings panel offers a question sensitivity picker (strict / standard / high)", sensitivityError === "", sensitivityError);
+
 	// A profile without DSH-better-sidebar must still work: no tab type, and the
 	// left panel falls back to the full surface so nothing becomes unreachable.
 	const fallback = makeCtx(declaredSlots, { betterSidebar: false });

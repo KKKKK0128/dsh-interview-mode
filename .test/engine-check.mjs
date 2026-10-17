@@ -560,5 +560,109 @@ console.log('知识库（选定资料并内联进提问消息）')
   })
 }
 
+console.log('提问灵敏度（strict / standard / high）')
+{
+  check('标准档把「吗 / 呢 / 么」结尾的句子也算提问', () => {
+    for (const text of ['有做过相关的项目吗', '你实习过吗', '用过 Cadence 么', '论文投出去了吗。']) {
+      assert.equal(looksLikeQuestion(text, 'standard'), true, text)
+    }
+  })
+  check('保守档不认语气词，只认疑问词', () => {
+    assert.equal(looksLikeQuestion('你实习过吗', 'strict'), false)
+    assert.equal(looksLikeQuestion('你实习过吗', 'standard'), true)
+    assert.equal(looksLikeQuestion('这个项目的难点在哪里呢', 'strict'), true)
+  })
+  check('标准档新增疑问线索（多大 / 多长 / 讲一下…）', () => {
+    for (const text of [
+      '这个项目的规模多大',
+      '你在这个项目上待了多长时间',
+      '再讲一下你的时序收敛流程',
+      'How many tape-outs have you done',
+    ]) {
+      assert.equal(looksLikeQuestion(text, 'standard'), true, text)
+    }
+  })
+  check('高灵敏档认弱话题词与请求式开头', () => {
+    for (const text of ['你的优势是什么先不用讲，说说缺点', '规划上没有别的想法了吗', '原因在这里', '你的方案我看看']) {
+      assert.equal(looksLikeQuestion(text, 'high'), true, text)
+    }
+    assert.equal(looksLikeQuestion('你实习过吗', 'standard'), true)
+    assert.equal(looksLikeQuestion('具体一点', 'high'), false)
+    assert.equal(looksLikeQuestion('我本科就读于山东大学应用物理专业', 'high'), false)
+  })
+  check('未知档位回落到标准档', () => {
+    assert.equal(looksLikeQuestion('你实习过吗', 'banana'), true)
+    assert.equal(looksLikeQuestion('我当时负责硬件部分的调试', 'banana'), false)
+  })
+  check('configure 只接受三个已知档位', () => {
+    const engine = new InterviewEngine({
+      capture: makeCapture([]),
+      speech: makeSpeech([]),
+      speechService: () => ({}),
+      sessionController: () => makeSessions([]),
+      settings: { cooldownMs: 10 },
+    })
+    assert.equal(engine.settings.questionSensitivity, 'standard')
+    assert.equal(engine.settings.minQuestionChars, 4)
+    assert.equal(engine.configure({ questionSensitivity: 'HIGH' }).questionSensitivity, 'high')
+    assert.equal(engine.configure({ questionSensitivity: 'banana' }).questionSensitivity, 'high')
+    assert.equal(engine.configure({ questionSensitivity: null }).questionSensitivity, 'high')
+    assert.equal(engine.configure({ questionSensitivity: 'strict' }).questionSensitivity, 'strict')
+  })
+  const segments = [
+    { text: '这个 ADC 的采样率是多少？', peak: 0.2, seconds: 3 },
+    { text: '具体一点', peak: 0.2, seconds: 2 },
+    { text: '答辩的时候老师问的问题都很简单', peak: 0.2, seconds: 3 },
+  ]
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture(segments),
+    speech: makeSpeech(segments.map((item) => item.text)),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, questionSensitivity: 'high' },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 3 && engine.delivered + engine.dropped >= 3)
+  check('高灵敏档：提问后的短句算追问并投递', () => {
+    assert.equal(records.length, 2)
+    assert.ok(records[0].content[0].text.startsWith(QUESTION_TAG))
+    assert.ok(records[1].content[0].text.startsWith(QUESTION_TAG))
+    assert.ok(records[1].content[0].text.includes('具体一点'))
+    const promoted = engine.segments.find((item) => item.text === '具体一点')
+    assert.equal(promoted.isQuestion, true)
+    assert.equal(promoted.promoted, 'follow-up')
+  })
+  check('高灵敏档：长陈述仍不投递', () => {
+    const statement = engine.segments.find((item) => item.text === '答辩的时候老师问的问题都很简单')
+    assert.equal(statement.isQuestion, false)
+    assert.equal(statement.reason, 'not-a-question')
+  })
+  await engine.stop()
+}
+{
+  const segments = [
+    { text: '这个 ADC 的采样率是多少？', peak: 0.2, seconds: 3 },
+    { text: '具体一点', peak: 0.2, seconds: 2 },
+  ]
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture(segments),
+    speech: makeSpeech(segments.map((item) => item.text)),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, questionSensitivity: 'standard' },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 2 && engine.delivered + engine.dropped >= 2)
+  check('标准档不做追问兜底，短句仍被丢弃', () => {
+    assert.equal(records.length, 1)
+    const follower = engine.segments.find((item) => item.text === '具体一点')
+    assert.equal(follower.isQuestion, false)
+    assert.equal(follower.reason, 'not-a-question')
+  })
+  await engine.stop()
+}
+
 console.log(`\n${failed === 0 ? 'ALL ENGINE CHECKS PASSED' : 'ENGINE CHECKS FAILED'}  (passed ${passed}, failed ${failed})`)
 process.exit(failed === 0 ? 0 : 1)
