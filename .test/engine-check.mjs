@@ -8,6 +8,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { InterviewEngine, isSessionRunning, pickSessionId, sessionTitle } from '../lib/engine.js'
 import {
@@ -18,6 +20,9 @@ import {
   normalizeText,
   similarity,
 } from '../lib/prompt.js'
+import { KNOWLEDGE_TAG, MAX_KNOWLEDGE_PATHS } from '../lib/knowledge.js'
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url))
 
 let passed = 0
 let failed = 0
@@ -477,6 +482,82 @@ console.log('英文识别（语言提示与自动重转）')
     assert.equal(engine.segments[0].lang, 'zh')
   })
   await engine.stop()
+}
+
+console.log('知识库（选定资料并内联进提问消息）')
+{
+  const KB_DIR = join(TEST_DIR, 'fixtures')
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: '这个项目的难点在哪里呢？', peak: 0.2, seconds: 3 }]),
+    speech: makeSpeech(['这个项目的难点在哪里呢？']),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10, knowledgeBase: KB_DIR },
+  })
+  check('status 只带知识库摘要，不带内联正文', () => {
+    const info = engine.status().knowledge
+    assert.equal(info.path, KB_DIR)
+    assert.equal(info.kind, 'dir')
+    assert.equal(info.included, 1)
+    assert.equal(info.totalFiles, 1)
+    assert.ok(info.bytes > 0)
+    assert.equal('block' in info, false)
+  })
+  check('知识库结果有热缓存，force 时重算', () => {
+    const first = engine.knowledge()
+    assert.equal(engine.knowledge(), first)
+    assert.notEqual(engine.knowledge(undefined, true), first)
+    assert.ok(engine.knowledge().block.includes(KNOWLEDGE_TAG))
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 1 && engine.delivered >= 1)
+  check('投递消息附上知识库块，仍以提问标记开头', () => {
+    const text = records[0].content[0].text
+    assert.ok(text.startsWith(QUESTION_TAG), text)
+    assert.ok(text.includes(KNOWLEDGE_TAG), text)
+    assert.ok(text.includes('ΔSFDR +14.77 dB'), text)
+    assert.ok(text.includes('kb.md'), text)
+  })
+  await engine.stop()
+}
+{
+  const records = []
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: '介绍一下你自己？', peak: 0.2, seconds: 3 }]),
+    speech: makeSpeech(['介绍一下你自己？']),
+    speechService: () => ({}),
+    sessionController: () => makeSessions(records),
+    settings: { cooldownMs: 10 },
+  })
+  check('configure 接受并规范化 knowledgeBase / knowledgeList', () => {
+    const many = Array.from({ length: MAX_KNOWLEDGE_PATHS + 6 }, (_, index) => `C:\\kb\\p${index}`)
+    const next = engine.configure({ knowledgeBase: '  "C:\\kb\\a"  ', knowledgeList: many.concat(['c:\\kb\\p0']) })
+    assert.equal(next.knowledgeBase, 'C:\\kb\\a')
+    assert.equal(next.knowledgeList.length, MAX_KNOWLEDGE_PATHS)
+    assert.equal(next.knowledgeList[0], 'C:\\kb\\p0')
+    assert.equal(engine.configure({ knowledgeBase: null }).knowledgeBase, '')
+  })
+  check('未选知识库时不内联任何内容', () => {
+    const result = engine.knowledge()
+    assert.equal(result.kind, 'empty')
+    assert.equal(result.block, '')
+    assert.equal(engine.knowledgeSummary().included, 0)
+  })
+  check('开始监听清空上一次的片段与计数', async () => {
+    engine.segments.push({ t: 0, text: '上一轮的残留', peak: 0.2, delivered: true, reason: '' })
+    engine.lastText = '上一轮的残留'
+    engine.delivered = 3
+    engine.dropped = 2
+    engine.lastDelivery = { at: 0, text: '残留', ok: true }
+    await engine.start({ sessionId: 's-target' })
+    assert.equal(engine.segments.length, 0)
+    assert.equal(engine.lastText, '')
+    assert.equal(engine.delivered, 0)
+    assert.equal(engine.dropped, 0)
+    assert.equal(engine.lastDelivery, null)
+    await engine.stop()
+  })
 }
 
 console.log(`\n${failed === 0 ? 'ALL ENGINE CHECKS PASSED' : 'ENGINE CHECKS FAILED'}  (passed ${passed}, failed ${failed})`)

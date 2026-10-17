@@ -7,6 +7,9 @@ node_modules/
 *.log
 *-log.txt
 
+# 测试临时目录（.test/knowledge-check.mjs 跑完会自行清理）
+.test/.fixture-kb/
+
 # 系统噪声
 Thumbs.db
 .DS_Store

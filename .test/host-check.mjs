@@ -3,7 +3,7 @@
  *
  * 用途：在把插件注册进 profile、重启应用**之前**，先确认
  *   1. lib/index.js 能被 node 导入（`dsh-system-audio/recorder|speech` 的解析路径没问题）；
- *   2. apply(root) 用假上下文跑一遍不会抛错，且真的挂上了 6~7 条 /interview 路由、
+ *   2. apply(root) 用假上下文跑一遍不会抛错，且真的挂上了 9 条 /interview 路由、
  *      一个 preset、一个系统提示词段；
  *   3. /interview/ping 与 /interview/status 在空闲状态下就能返回合法 JSON；
  *   4. 卸载（effect 的 disposer）不抛错。
@@ -14,8 +14,12 @@
  */
 
 import assert from 'node:assert/strict'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { apply } from '../lib/index.js'
+
+const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 
 let passed = 0
 let failed = 0
@@ -103,7 +107,7 @@ function makeResponse() {
 }
 
 async function callRoute(method, path, body) {
-  const route = routes.get(`exact ${path}`)
+  const route = routes.get(`exact ${path.split('?')[0]}`)
   assert(route !== undefined, `route not registered: ${path}`)
   const response = makeResponse()
   const request = {
@@ -143,7 +147,7 @@ await sleep(20)
 
 check('挂上了全部 /interview/* 路由', () => {
   const paths = [...routes.keys()].filter((key) => key.startsWith('exact /interview/')).map((key) => key.slice(6))
-  const expected = ['/interview/ping', '/interview/status', '/interview/sessions', '/interview/devices', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/config']
+  const expected = ['/interview/ping', '/interview/status', '/interview/sessions', '/interview/devices', '/interview/knowledge', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/config']
   for (const path of expected) assert(paths.includes(path), `missing route ${path}（已注册：${paths.join(', ')}）`)
 })
 
@@ -201,6 +205,18 @@ console.log('路由行为（空闲态）')
     assert.equal(sessions.json?.items?.[0]?.sessionId, 's-1')
     assert.equal(sessions.json?.items?.[0]?.title, '')
     assert.equal(sessions.json?.target, '')
+  })
+
+  const knowledge = await callRoute('GET', `/interview/knowledge?path=${encodeURIComponent(FIXTURES)}`)
+  check('GET /interview/knowledge → 只回摘要与文件清单，不回内联正文', () => {
+    assert.equal(knowledge.response.statusCode, 200, `status ${knowledge.response.statusCode}: ${knowledge.response.body}`)
+    assert.equal(knowledge.json?.ok, true)
+    assert.equal(knowledge.json?.kind, 'dir')
+    assert.equal(knowledge.json?.included, 1)
+    assert.equal(knowledge.json?.totalFiles, 1)
+    assert.equal(knowledge.json?.block, undefined, 'block 不应下发')
+    assert.ok(knowledge.json?.blockChars > 0, 'blockChars 应大于 0')
+    assert.equal(knowledge.json?.files?.[0]?.rel, 'kb.md')
   })
 
   const stop = await callRoute('POST', '/interview/stop')

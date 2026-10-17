@@ -496,6 +496,48 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 	}
 	check("settings panel offers a recognition language picker (auto / 中文 / English)", languageError === "", languageError);
 
+	// 渲染级：知识库下拉框（选资料）/ 路径输入框 / 添加按钮都存在，改选路径后同样
+	// 经 300ms 防抖 POST /interview/config，把选中资料写回宿主。
+	let knowledgeError = "";
+	try {
+		const node = innerNode(main.component({ t: (k) => k, sessionId: "session-abc" }));
+		const selects = [];
+		const inputs = [];
+		const buttons = [];
+		const walk = (current) => {
+			if (current === null || current === undefined || typeof current !== "object") return;
+			if (current.type === "select") selects.push(current);
+			if (current.type === "input") inputs.push(current);
+			if (current.type === "button") buttons.push(current);
+			const children = Array.isArray(current.props?.children) ? current.props.children : [current.props?.children];
+			for (const child of children) walk(child);
+		};
+		walk(node);
+		const optionsOf = (item) => (Array.isArray(item.props?.children) ? item.props.children : [item.props?.children]);
+		const picker = selects.find((item) => optionsOf(item).some((option) => option?.props?.children === "No knowledge base"));
+		const pathInput = inputs.find((item) => item.props?.placeholder === "Paste a folder or file path");
+		const addButton = buttons.find((item) => item.props?.children === "Add");
+		const removeButton = buttons.find((item) => item.props?.children === "Remove");
+		if (picker === undefined) knowledgeError = `no knowledge select among ${selects.length} select(s)`;
+		else if (pathInput === undefined) knowledgeError = `no knowledge path input among ${inputs.length} input(s)`;
+		else if (addButton === undefined) knowledgeError = `no knowledge add button among ${buttons.length} button(s)`;
+		else if (removeButton === undefined) knowledgeError = "no knowledge remove button";
+		else if (picker.props.value !== "") knowledgeError = `initial value=${String(picker.props.value)}`;
+		else {
+			picker.props.onChange({ target: { value: "F:\\SDU\\k" } });
+			for (const timer of timers.splice(0)) timer.fn();
+			await sleep(0);
+			const posted = fetchCalls.filter((call) => call.url.includes("/interview/config"));
+			if (posted.length === 0) knowledgeError = "choosing a knowledge base did not POST /interview/config";
+			else if (!String(posted.at(-1).init?.body ?? "").includes('"knowledgeBase"')) {
+				knowledgeError = `body=${String(posted.at(-1).init?.body ?? "")}`;
+			}
+		}
+	} catch (failure) {
+		knowledgeError = String(failure?.message ?? failure);
+	}
+	check("settings panel offers a knowledge base picker that pins the inlined material", knowledgeError === "", knowledgeError);
+
 	// A profile without DSH-better-sidebar must still work: no tab type, and the
 	// left panel falls back to the full surface so nothing becomes unreachable.
 	const fallback = makeCtx(declaredSlots, { betterSidebar: false });

@@ -1,6 +1,8 @@
-# 模拟面试模式 · 详细方案（v1.4）
+# 模拟面试模式 · 详细方案（v1.5）
 
 > 交付范围：**只出方案，不动代码**（按你的选择）。本文所有 DSH 接口签名均已通过 `cordis_inspect_query` 核对；标注「待 P0 验证」的条目是尚未在运行时确认的假设。
+>
+> **v1.5 修订（2026-10-17，已落地）**：新增「**选择知识库**」——设置面板里可粘贴一个文件夹/文件路径并保存为候选（下拉框切换、可移除），宿主读取其中的文本资料（`.md/.txt/.json/代码…`，`.docx` 现场抽正文）**内联进每条提问消息**的 `[知识库]` 段，回答约束改为「先按资料作答，资料里没有的再按常识补充，不编造具体数据」；新增 `lib/knowledge.js`（扫描/抽取/体积预算，默认最多 40 个文件、单文件 8 KB、合计 24 KB）与 `GET /interview/knowledge`（只回摘要与文件清单，不回正文）。同版调整：**开始监听时清空上一次的片段与计数**（不再保留上一轮识别记录）。涉修订章节：§6.2、§6.4、§6.6、§6.7、§8。
 >
 > **v1.4 修订（2026-10-17，已落地）**：新增「**英文语音识别**」——`language` 设置支持 `auto` / `zh` / `en`（面板设置里的「识别语言」下拉框）；`auto` 不再沿用 provider 的固定语言提示，而是交给 SenseVoice 做语种识别，若转出的文本明显是英文再用 `en` 提示重转一次（每段最多一次，取英文内容更多的那次）；英文提问线索词扩到 30+ 条，英文提问用英文回答。涉修订章节：§1、§6.4、§8。
 >
@@ -185,6 +187,7 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 
 - **目标会话（v1.3）**：投递对象由 `settings.targetSessionId` 决定——空串 = 每次投递前重新挑「最近更新的非空会话」（原行为）；非空 = 固定投到那个会话，`sessionController.list()` 里找不到它时**拒绝投递**并在片段上标 `reason:'no-session'`、在 `errors` 里报「选定的对话已不存在」，绝不静默改投。
 - **自动投递**：判定命中即投；同一文本 10 s 内只投一次；
+- **知识库（v1.5）**：若 `settings.knowledgeBase` 非空，投递时把 `collectKnowledge()` 的 `block`（带 `[知识库]` 标记、来源路径、`--- 相对路径 ---` 分隔的正文）追加在提问文本之后；资料在宿主侧读盘并做 5 分钟热缓存，面板通过 `GET /interview/knowledge` 只看摘要，正文不下发。
 - **热键补答**：`POST /interview/answer-last` → 取滚动缓冲最近 ≤30 s → 投递，格式为 `[模拟面试·补答请求] …`（侧边栏面板里的「补答最近一段」按钮走同一条路径）；
 - **忙时策略**（关键）：若 `sessionController.list()` 里本会话 `running === true`（Agent 正在回答上一问），则：
   - 默认 `mode:'queue'` 排队，避免打断；
@@ -261,6 +264,8 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 # 会话内插件配置（走 DSH 的插件 config，即 preset 行的 config 字段）
 deviceId: null          # null = 跟随系统默认播放设备
 targetSessionId: ''     # '' = 跟随当前打开的会话；非空 = 固定投递到该会话（v1.3）
+knowledgeBase: ''       # 当前选中的资料文件夹/文件；'' = 不使用知识库（v1.5）
+knowledgeList: []       # 面板保存过的候选路径（最多 20 条，下拉框选项）（v1.5）
 autoStart: false        # 打开会话就自动开始监听
 autoAnswer: true        # 自动投递（决策 2）
 silenceMs: 700          # 静音判停
@@ -299,6 +304,8 @@ panelOrder: 40          # 侧边栏图标位置
    - 去重：同一音频播两遍只投一次；
    - 缓冲：热键取到最近一段；
    - 选择对话（v1.3）：`listSessions` 过滤空/子代理会话并按更新时间排序；固定会话存在时优先于最近会话；固定会话消失时拒绝投递（`reason:'no-session'` + `errors`）。
+   - 英文识别（v1.4）：`detectLanguage` 中英判定、英文提问线索、显式 `en` 不重转、`auto` 下英文重转一次并保留英文结果；
+   - 知识库（v1.5）：路径规范化/去重限量、目录扫描的包含与排除（`node_modules`、隐藏文件、超深目录、超大文件、空文件、不支持格式）、体积截断与总预算、**两遍遴选（先抽正文，再按正文从小到大装预算）**、`.docx` 只受 8 MB 原始体积粗筛、内联块结构、投递消息带 `[知识库]` 段、`start()` 清空上一轮片段（`.test/knowledge-check.mjs` + engine/host/client 三套 battery）。
 2. **线上 E2E**（真实应用 + TTS 音频）：用 SAPI 生成已知中文提问（已有 `speech-zh.wav` 同类脚本）→ 播放 → 期望**对话里**出现 `[模拟面试·面试官提问] 已知文本` + Agent 回答；跑 3 轮。
 3. **UI 验收**：`client/Slots.listSubTree {root:'sidebar.panellist'}` 出现 `interview`（order 40），`{root:'main'}` 出现 key `interview`；点图标能进/出面板；面板里开始/停止监听生效；侧边栏折叠（rail）时图标仍可用。
 4. **稳定性**：连续 30 分钟播放音频片段，检查内存/句柄、设备是否被独占、投递条数与真实提问数一致。
@@ -337,5 +344,5 @@ panelOrder: 40          # 侧边栏图标位置
 ## 附：涉及文件
 
 - 现有：`dsh-system-audio\`（`lib/index.js`、`lib/routes.js`、`lib/speech.js`、`lib/recorder.js`、`lib/client.js`、`native\LoopbackRecorder.exe`、`.test\`）
-- 新增（待建）：`dsh-interview-mode\`（`package.json`、`lib/index.js`、`lib/engine.js`、`lib/routes.js`、`lib/prompt.js`、`lib/client.js`、`.test\`）
+- 新增（待建）：`dsh-interview-mode\`（`package.json`、`lib/index.js`、`lib/engine.js`、`lib/routes.js`、`lib/prompt.js`、`lib/knowledge.js`、`lib/client.js`、`.test\`）
 - 参考：DSH Inspect 查询输出（`host/Service.listService`、`client/Slots.listSubTree{root:'sidebar'|'sidebar.panellist'|'main'}`），用于核对上表签名与槽位
