@@ -13,6 +13,7 @@ import { InterviewEngine, isSessionRunning, pickSessionId, sessionTitle } from '
 import {
   FOLLOWUP_TAG,
   QUESTION_TAG,
+  detectLanguage,
   looksLikeQuestion,
   normalizeText,
   similarity,
@@ -104,6 +105,29 @@ function makeSpeech(texts) {
       return { text, language: 'zh', audioSeconds: 2, inferenceSeconds: 0.05 }
     },
     speechState: () => ({ providerId: 'fake', phase: 'ready', language: 'zh', languages: ['zh'] }),
+  }
+}
+
+/**
+ * 会记录语言提示的假转写器：'en' 提示返回英文、其它返回中文（或 autoText），
+ * 用来验证「显式语言生效」与「自动模式英文重转」。
+ */
+function makeLanguageSpeech(options = {}) {
+  const attempts = []
+  const chinese = options.chinese ?? '请解释一下这个失配模型？'
+  const english = options.english ?? 'Could you explain the mismatch model in your ADC pipeline?'
+  const autoText = options.autoText ?? chinese
+  return {
+    attempts,
+    DEFAULT_WAIT_MS: 1000,
+    ensureReady: async () => ({ providerId: 'fake', phase: 'ready', language: 'zh', languages: ['zh', 'en'] }),
+    transcribeWav: async (_service, _audio, opts = {}) => {
+      const language = typeof opts.language === 'string' ? opts.language : ''
+      attempts.push(language)
+      const text = language === 'en' ? english : autoText
+      return { text, language, audioSeconds: 2, inferenceSeconds: 0.05 }
+    },
+    speechState: () => ({ providerId: 'fake', phase: 'ready', language: 'zh', languages: ['zh', 'en'] }),
   }
 }
 
@@ -368,6 +392,89 @@ console.log('固定会话消失时拒绝投递')
     assert.equal(engine.delivered, 0)
     assert.equal(engine.segments[0].reason, 'no-session')
     assert.ok(engine.errors[0].message.includes('s-gone'), engine.errors[0].message)
+  })
+  await engine.stop()
+}
+
+console.log('英文识别（语言判定与英文提问判定）')
+check('detectLanguage 区分中英文与中英混排', () => {
+  assert.equal(detectLanguage('What is ENOB and how do you measure it?'), 'en')
+  assert.equal(detectLanguage('什么是 ENOB，怎么测？'), 'zh')
+  assert.equal(detectLanguage('我们的 ADC 用 SAR 架构，ENOB 大概 10 bit'), 'zh')
+  assert.equal(detectLanguage(''), '')
+  assert.equal(detectLanguage('12345 ??'), '')
+})
+check('真实英文面试提问能被判定为提问', () => {
+  const english = [
+    'Tell me about your experience with deep learning',
+    'Could you walk me through your ADC calibration pipeline',
+    'What is the biggest challenge you met',
+    'How do you handle timing violations',
+    'What are the advantages of this architecture',
+    'Can you explain the difference between SFDR and ENOB',
+  ]
+  for (const text of english) assert.equal(looksLikeQuestion(text), true, text)
+})
+check('英文陈述不误判为提问', () => {
+  const statements = [
+    'I studied applied physics at Shandong University',
+    'We used a causal temporal convolutional network for calibration',
+    'The chip was fabricated in a 65 nm CMOS process',
+    'My internship was in the hardware team',
+  ]
+  for (const text of statements) assert.equal(looksLikeQuestion(text), false, text)
+})
+
+console.log('英文识别（语言提示与自动重转）')
+{
+  const speech = makeLanguageSpeech()
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: 'Explain the mismatch model', peak: 0.2, seconds: 3 }]),
+    speech,
+    speechService: () => ({}),
+    sessionController: () => makeSessions([]),
+    settings: { cooldownMs: 10, language: 'en', autoAnswer: false },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 1)
+  check('显式 English：转写带 en 提示且不额外重转', () => {
+    assert.deepEqual(speech.attempts, ['en'])
+    assert.equal(engine.segments[0].lang, 'en')
+  })
+  await engine.stop()
+}
+{
+  const speech = makeLanguageSpeech({ autoText: 'Could you explain the mismatch model in your ADC pipeline?' })
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: 'auto english', peak: 0.2, seconds: 3 }]),
+    speech,
+    speechService: () => ({}),
+    sessionController: () => makeSessions([]),
+    settings: { cooldownMs: 10, language: 'auto', autoAnswer: false },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 1)
+  check('自动模式：英文句子用 en 再转一次，并保留英文结果', () => {
+    assert.deepEqual(speech.attempts, ['', 'en'])
+    assert.equal(engine.segments[0].lang, 'en')
+    assert.ok(engine.segments[0].text.startsWith('Could you explain'), engine.segments[0].text)
+  })
+  await engine.stop()
+}
+{
+  const speech = makeLanguageSpeech()
+  const engine = new InterviewEngine({
+    capture: makeCapture([{ text: 'auto chinese', peak: 0.2, seconds: 3 }]),
+    speech,
+    speechService: () => ({}),
+    sessionController: () => makeSessions([]),
+    settings: { cooldownMs: 10, language: 'auto', autoAnswer: false },
+  })
+  await engine.start({ sessionId: 's-target' })
+  await waitFor(() => engine.segments.length >= 1)
+  check('自动模式：中文句子不触发重转', () => {
+    assert.deepEqual(speech.attempts, [''])
+    assert.equal(engine.segments[0].lang, 'zh')
   })
   await engine.stop()
 }

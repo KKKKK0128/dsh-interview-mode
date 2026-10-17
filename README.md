@@ -29,6 +29,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | 打开转写标签页 | 开始监听后自动打开一次；也可在右侧栏 `+` 菜单里选「模拟面试转写」 |
 | 设备 / 静音阈值 / 自动回答 | 左栏「模拟面试」图标 → 主面板（**只留设置**），写 `POST /interview/config` |
 | 选择投递到哪个对话 | 主面板设置里的「**选择对话**」下拉框（`targetSessionId`）。默认 `Auto` = 跟随当前打开的会话；选中某个对话后，所有提问都投到它，选中的对话被关掉时**拒绝投递并提示**，不会改投到别的会话 |
+| 识别语言（中文 / 英文） | 主面板设置里的「**识别语言**」下拉框（`language`）。`auto` = 交给 SenseVoice 做语种识别，英文句子会自动再以 `en` 提示重转一次；面试全程英文时直接选 `English`，省掉这次重转。提问判定对英文线索（what / why / could you / tell me about / experience / challenge …）同样生效，英文提问会用英文回答 |
 | 提问与答案 | **对话里**：提问以 `[模拟面试·面试官提问] …` 消息进入当前会话，Agent 的回答就是普通回复 |
 
 右侧栏标签页由可选插件 [`DSH-better-sidebar`](https://www.npmjs.com/package/dsh-better-sidebar) 提供（DSH 客户端服务 `ctx.betterSidebar`）；没装它时插件自动退回「全部功能都在左面板」的旧形态，不报错。面板与标签页的内容超出高度时可**上下滚动**（转写列表另有独立滚动区，最多占 46vh，保证上方的开关始终可见）。
@@ -50,7 +51,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | `targetSessionId` | `''` | 投递目标对话：`''` = 跟随当前会话；非空 = 固定投到该会话 |
 | `maxBufferSeconds` / `maxSegments` | 30 / 60 | 滚动缓冲，供「补答最近一句」 |
 | `interruptWhenBusy` | false | Agent 忙时排队（**默认**），true 才 `cancel` 后 `steer` |
-| `language` | `auto` | 跟随 SenseVoice 判定 |
+| `language` | `auto` | 识别语言：`auto` = 交给 SenseVoice 语种识别（英文段再以 `en` 重转一次兜底）；`zh` / `en` = 强行按该语言转写 |
 | `hotkey` | `Ctrl+Shift+I` | 页面内热键 |
 
 ## 路由（宿主半，`webServer.register` 的 exact 路由）
@@ -87,9 +88,9 @@ cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.clie
 
 ```bash
 NODE="$USERPROFILE/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
-"$NODE" .test/engine-check.mjs    # 21/21：提问判定、相似度、会话选择（含固定目标会话 / 目标消失拒投）、分段引擎、忙时排队、静音段丢弃、config 夹取
+"$NODE" .test/engine-check.mjs    # 27/27：提问判定（含英文线索）、相似度、会话选择（含固定目标会话 / 目标消失拒投）、分段引擎、忙时排队、静音段丢弃、config 夹取、英文识别（语言提示 + 自动重转）
 "$NODE" .test/host-check.mjs      # 11/11：路由行为（含 GET /interview/sessions）+ 卸载
-"$NODE" .test/client-check.mjs    # 侧边栏注册 + 面板渲染 + 选择对话下拉框（含 dsh-system-audio 不再注册输入框按钮）
+"$NODE" .test/client-check.mjs    # 侧边栏注册 + 面板渲染 + 选择对话下拉框 + 识别语言下拉框（含 dsh-system-audio 不再注册输入框按钮）
 ```
 
 现场端到端（**需要非沙箱**：沙箱进程放出的声音进不了环回采集）：
@@ -101,6 +102,8 @@ pwsh -NoProfile -File .test/live-interview.ps1
 它会用 SAPI 合成一句「提问 + 陈述 + 提问」的中文（`.test/question-zh.wav`，已生成则复用），`POST /interview/start` 后播放，再打印 `/interview/status` 与 `/interview/stop`。
 
 **2026-10-16 实测**：3 段全部转写正确；「请你介绍一下你在光电硬件方面最擅长的项目经验。」与「…难点在哪里呢？」判定为提问并 `delivered:true`；「后来读了硕士。」判为陈述丢弃；`errors: []`；`sessionId` 自动解析为当时的活动会话。
+
+**英文路径（v1.4）**：`language` 三档语义与「自动模式下英文段再重转一次」由离线 battery 覆盖（见 `.test/engine-check.mjs` 的「英文识别」两段）；`lib/engine.js` 是宿主半、按进程缓存，**改完要重启 DSH Desktop** 才生效。英文识别本身用 SenseVoice 的 `en` 提示（provider 支持 zh/en/ja/ko/yue）；本机 SAPI 英文合成在沙箱里会挂起，故未做环回实测（需要非沙箱环境跑 `.test/live-interview.ps1` 的英文版）。
 
 ## 注意
 

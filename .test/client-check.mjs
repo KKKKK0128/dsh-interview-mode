@@ -382,6 +382,14 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 	check("offers a select bound to the pinned conversation", /value: targetSessionId,/.test(source) && /label\(t, "sessionAuto"\)/.test(source));
 	check("supplies a readable fallback for untitled conversations", /function sessionOptionLabel\(/.test(source) && /function shortSession\(/.test(source) && /sessionUntitled/.test(source))
 
+	// v1.4 英文识别：设置面板的识别语言下拉框（auto / zh / en）同样经 /interview/config 下发。
+	check("keeps the recognition language in state", /const \[language, setLanguage\] = React\.useState\("auto"\)/.test(source));
+	check("persists the recognition language through POST /interview/config", /pushConfig\(\{ language: next \}\)/.test(source));
+	check(
+		"offers a language select with auto / zh / en options",
+		/value: language,/.test(source) && /label\(t, "languageAuto"\)/.test(source) && /value: "en"/.test(source),
+	);
+
 	// The seats wrap the real component in the error boundary, so descend one
 	// level and render the inner component to inspect what it actually returns.
 	const innerNode = (seatElement) => {
@@ -454,6 +462,39 @@ async function loadBundle(file, optionalRequires = [], options = {}) {
 		pickerError = String(failure?.message ?? failure);
 	}
 	check("settings panel offers a conversation picker that pins the delivery target", pickerError === "", pickerError);
+
+	// 渲染级：识别语言下拉框改成 English 后同样经 300ms 防抖 POST 下发。
+	let languageError = "";
+	try {
+		const node = innerNode(main.component({ t: (k) => k, sessionId: "session-abc" }));
+		const selects = [];
+		const collectAll = (current) => {
+			if (current === null || current === undefined || typeof current !== "object") return;
+			if (current.type === "select") selects.push(current);
+			const children = Array.isArray(current.props?.children) ? current.props.children : [current.props?.children];
+			for (const child of children) collectAll(child);
+		};
+		collectAll(node);
+		const picker = selects.find((item) => {
+			const options = Array.isArray(item.props?.children) ? item.props.children : [item.props?.children];
+			return options.some((option) => option?.props?.value === "en") && options.some((option) => option?.props?.value === "zh");
+		});
+		if (picker === undefined) languageError = `no language select among ${selects.length} select(s)`;
+		else if (picker.props.value !== "auto") languageError = `value=${String(picker.props.value)}`;
+		else {
+			picker.props.onChange({ target: { value: "en" } });
+			for (const timer of timers.splice(0)) timer.fn();
+			await sleep(0);
+			const posted = fetchCalls.filter((call) => call.url.includes("/interview/config"));
+			if (posted.length === 0) languageError = "changing the language did not POST /interview/config";
+			else if (!String(posted.at(-1).init?.body ?? "").includes('"language":"en"')) {
+				languageError = `body=${String(posted.at(-1).init?.body ?? "")}`;
+			}
+		}
+	} catch (failure) {
+		languageError = String(failure?.message ?? failure);
+	}
+	check("settings panel offers a recognition language picker (auto / 中文 / English)", languageError === "", languageError);
 
 	// A profile without DSH-better-sidebar must still work: no tab type, and the
 	// left panel falls back to the full surface so nothing becomes unreachable.
