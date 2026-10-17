@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 
-import { InterviewEngine, isSessionRunning, pickSessionId } from '../lib/engine.js'
+import { InterviewEngine, isSessionRunning, pickSessionId, sessionTitle } from '../lib/engine.js'
 import {
   FOLLOWUP_TAG,
   QUESTION_TAG,
@@ -299,6 +299,75 @@ console.log('静音段与配置夹取')
     assert.equal(settings.dupSimilarity, 1)
     assert.equal(settings.autoAnswer, false)
     assert.equal(settings.deviceId, '')
+  })
+  await engine.stop()
+}
+
+console.log('选择对话（目标会话）')
+{
+  const records = []
+  const sessions = [
+    { sessionId: 's-old', updatedAt: 10, blank: false, title: '旧的面试' },
+    { sessionId: 's-new', updatedAt: 90, blank: false, running: true, projections: { values: { title: '新的面试' } } },
+    { sessionId: 's-blank', updatedAt: 100, blank: true },
+    { sessionId: 's-sub', updatedAt: 110, origin: 'subagent' },
+  ]
+  const { engine } = makeEngine(
+    [{ text: '请解释一下失配模型？', peak: 0.2, seconds: 3 }],
+    ['请解释一下失配模型？'],
+    records,
+    { sessions, settings: { targetSessionId: 's-old' } },
+  )
+  await engine.start({ sessionId: 's-new' })
+  const listing = await engine.listSessions()
+  check('listSessions 过滤空/子代理会话、按最近更新排序、标出 current 与 target', () => {
+    assert.equal(listing.ok, true)
+    assert.equal(listing.error, '')
+    assert.deepEqual(listing.items.map((item) => item.sessionId), ['s-new', 's-old'])
+    assert.equal(listing.items[0].title, '新的面试')
+    assert.equal(listing.items[1].title, '旧的面试')
+    assert.equal(listing.items[0].running, true)
+    assert.equal(listing.items[0].current, true)
+    assert.equal(listing.items[1].target, true)
+    assert.equal(listing.current, 's-new')
+    assert.equal(listing.target, 's-old')
+  })
+  await waitFor(() => engine.delivered >= 1)
+  check('固定投递的会话优先于最近活动的会话', () => {
+    assert.equal(records.length, 1)
+    assert.equal(records[0].sessionId, 's-old')
+  })
+  check('configure 接受 targetSessionId（null 清空回自动）', () => {
+    assert.equal(engine.configure({ targetSessionId: 's-new' }).targetSessionId, 's-new')
+    assert.equal(engine.configure({ targetSessionId: null }).targetSessionId, '')
+    assert.equal(engine.status().targetSessionId, '')
+  })
+  check('sessionTitle 兼容 title / name / displayTitle / 投影值', () => {
+    assert.equal(sessionTitle({ name: '甲' }), '甲')
+    assert.equal(sessionTitle({ displayTitle: '乙' }), '乙')
+    assert.equal(sessionTitle({ projections: { values: { summary: '丙' } } }), '丙')
+    assert.equal(sessionTitle({ title: '   ' }), '')
+    assert.equal(sessionTitle({}), '')
+  })
+  await engine.stop()
+}
+
+console.log('固定会话消失时拒绝投递')
+{
+  const records = []
+  const { engine } = makeEngine(
+    [{ text: '那这个噪声是怎么处理的？', peak: 0.2, seconds: 3 }],
+    ['那这个噪声是怎么处理的？'],
+    records,
+    { sessions: [{ sessionId: 's-other', updatedAt: 9, blank: false }], settings: { targetSessionId: 's-gone' } },
+  )
+  await engine.start({ sessionId: 's-other' })
+  await waitFor(() => engine.segments.length >= 1 && engine.errors.length >= 1)
+  check('选定的对话不存在时宁可报错也不改投到别的会话', () => {
+    assert.equal(records.length, 0)
+    assert.equal(engine.delivered, 0)
+    assert.equal(engine.segments[0].reason, 'no-session')
+    assert.ok(engine.errors[0].message.includes('s-gone'), engine.errors[0].message)
   })
   await engine.stop()
 }

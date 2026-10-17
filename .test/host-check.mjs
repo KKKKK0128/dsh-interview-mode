@@ -143,7 +143,7 @@ await sleep(20)
 
 check('挂上了全部 /interview/* 路由', () => {
   const paths = [...routes.keys()].filter((key) => key.startsWith('exact /interview/')).map((key) => key.slice(6))
-  const expected = ['/interview/ping', '/interview/status', '/interview/devices', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/config']
+  const expected = ['/interview/ping', '/interview/status', '/interview/sessions', '/interview/devices', '/interview/start', '/interview/stop', '/interview/answer-last', '/interview/config']
   for (const path of expected) assert(paths.includes(path), `missing route ${path}（已注册：${paths.join(', ')}）`)
 })
 
@@ -190,6 +190,17 @@ console.log('路由行为（空闲态）')
     assert.equal(config.json?.ok, true)
     assert.equal(config.json?.settings?.autoAnswer, false)
     assert.equal(config.json?.settings?.silenceMs, 5000)
+  })
+
+  const sessions = await callRoute('GET', '/interview/sessions')
+  check('GET /interview/sessions → 可选对话列表（含 current/target 标记）', () => {
+    assert.equal(sessions.response.statusCode, 200, `status ${sessions.response.statusCode}: ${sessions.response.body}`)
+    assert.equal(sessions.json?.ok, true)
+    assert.equal(sessions.json?.error, '')
+    assert.ok(Array.isArray(sessions.json?.items), 'items 必须是数组')
+    assert.equal(sessions.json?.items?.[0]?.sessionId, 's-1')
+    assert.equal(sessions.json?.items?.[0]?.title, '')
+    assert.equal(sessions.json?.target, '')
   })
 
   const stop = await callRoute('POST', '/interview/stop')

@@ -1,6 +1,10 @@
-# 模拟面试模式 · 详细方案（v1.1 草案）
+# 模拟面试模式 · 详细方案（v1.3）
 
 > 交付范围：**只出方案，不动代码**（按你的选择）。本文所有 DSH 接口签名均已通过 `cordis_inspect_query` 核对；标注「待 P0 验证」的条目是尚未在运行时确认的假设。
+>
+> **v1.3 修订（2026-10-16，已落地）**：新增「**选择对话**」——设置面板里可把提问固定投递到指定会话，默认 `targetSessionId: ''` 跟随当前打开的会话；新增 `GET /interview/sessions`（返回可投递的会话清单，含 `current`/`target` 标记），选中的会话若消失则**拒绝投递并报错**，不会改投到别的会话。涉修订章节：§3、§6.4、§6.6、§6.7、§8。
+>
+> **v1.2 修订（2026-10-16，已落地）**：界面拆成「**左面板只留设置 + 右侧栏转写标签页**」。转写历史、补答、启停监听移到 **DSH-better-sidebar**（`ctx.betterSidebar.registerTab`）提供的右侧栏标签页；`main` 面板退化为设置页。修订涉及的章节：§3、§4、§6.2、§6.6、§7、§9。
 >
 > **v1.1 修订（2026-10-15）**：UI 从「输入框图标按钮」改为「**侧边栏面板**」（左侧栏图标 + 主面板），输入框区域不再放本模式 UI；问答**直接作为聊天消息显示在对话里**。修订涉及的章节：§1、§3、§4、§5、§6.2、§6.6、§7、§9、§10。
 
@@ -177,6 +181,7 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 （来源：电脑音频自动转写，可能有错字；请直接给出可照读的口语化回答）
 ```
 
+- **目标会话（v1.3）**：投递对象由 `settings.targetSessionId` 决定——空串 = 每次投递前重新挑「最近更新的非空会话」（原行为）；非空 = 固定投到那个会话，`sessionController.list()` 里找不到它时**拒绝投递**并在片段上标 `reason:'no-session'`、在 `errors` 里报「选定的对话已不存在」，绝不静默改投。
 - **自动投递**：判定命中即投；同一文本 10 s 内只投一次；
 - **热键补答**：`POST /interview/answer-last` → 取滚动缓冲最近 ≤30 s → 投递，格式为 `[模拟面试·补答请求] …`（侧边栏面板里的「补答最近一段」按钮走同一条路径）；
 - **忙时策略**（关键）：若 `sessionController.list()` 里本会话 `running === true`（Agent 正在回答上一问），则：
@@ -203,7 +208,27 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 
 （该段用 `systemPrompt.section({ name:'interview-mode', order:30, text })` 注入，随模式作用域生效。）
 
-### 6.6 前端（浏览器侧）—— **侧边栏面板**（v1.1 重写）
+### 6.6 前端（浏览器侧）—— **左面板设置 + 右栏转写标签页**（v1.2 重写，已落地）
+
+**座位划分**（DSH 原生槽位 + `DSH-better-sidebar` 的客户端服务）：
+
+| 位置 | 内容 | 注册方式 |
+| --- | --- | --- |
+| 左栏图标 | 「模拟面试」图标（空闲灰 / 监听中红点脉冲） | `sidebar.panellist`（list）：`{ id:'interview', order:40, label }` |
+| 左栏主面板 | **只留设置**：开始/停止监听、输出设备、静音阈值/最短语音、自动回答、热键说明、未选会话提示，以及「打开转写标签页」按钮 | `main`（keyed，key `'interview'`） |
+| 右侧栏标签页 | **转写历史 + 补答 + 启停**：实时电平、最近一句、片段列表（时间/文本/是否已投递/补答/复制）、开始/停止 | `ctx.betterSidebar.registerTab({ id:'dsh-interview-mode:transcript', order:120, single:true, component })` |
+| 会话对话区 | 问答本体：提问以 `[模拟面试·面试官提问] …` 进入当前会话，Agent 回答是普通回复 | 无 UI |
+| 输入框区 `conversation.input.*` | 零改动 | 无 UI |
+
+**可选依赖**：`dsh-better-sidebar` 只做增强。客户端按 `ctx.get('betterSidebar') ?? ctx.betterSidebar` 探测（先 cordis 服务访问器，再文档里的属性形式——实测活动页面只有前者可靠），缺席时插件照常工作：面板退回 `full` 变体（历史与补答仍在面板里），不注册标签页。两个客户端半的加载顺序不定，注册放在 `500 ms × 60` 的探测 effect 里；返回的 disposer 由该 effect 持有、随插件销毁（热重载安全）。重复 id（热重载与旧实例的 disposer 抢跑）只记一次日志并继续重试，绝不让客户端半整体失败。
+
+**实现要点**：
+
+1. **渲染期绝不调用 owner hook**（如 `props.useSessions()`）。历史上这样写过一次，触发 React #311「Rendered fewer hooks than expected」，面板整块空白且没有可见错误。当前会话 id 只从普通字段读：`props.sessionId` / `props.activeSessionId` / `props.session.sessionId`；标签页用 better-sidebar 传入的 `props.scope.sessionId`；真正的投递目标由宿主引擎解析。
+2. 面板与标签页共用同一组件，靠 `variant`（`full` / `settings` / `tab`）决定渲染哪些 section；**hook 调用顺序与所有 section 的构造不随 variant 变化**（同样是 #311 的教训）。
+3. 打开标签页：`betterSidebar.openTab({ type, title }, { sessionId })`；开始监听成功后自动打开一次（`AUTO_OPEN_TAB`，默认开）。
+
+### 6.6b 附录：v1.1 的侧边栏面板设计（已被 §6.6 取代）
 
 **已核对的槽位事实**（`cordis_inspect_query client/Slots.listSubTree`）：
 
@@ -233,6 +258,7 @@ idle ──start()──> listening ──(采集到语音)──> speaking
 ```yaml
 # 会话内插件配置（走 DSH 的插件 config，即 preset 行的 config 字段）
 deviceId: null          # null = 跟随系统默认播放设备
+targetSessionId: ''     # '' = 跟随当前打开的会话；非空 = 固定投递到该会话（v1.3）
 autoStart: false        # 打开会话就自动开始监听
 autoAnswer: true        # 自动投递（决策 2）
 silenceMs: 700          # 静音判停
@@ -269,11 +295,12 @@ panelOrder: 40          # 侧边栏图标位置
    - 分段：静音 0.5 s 切段正确；`maxSegmentMs` 截断；
    - 判定：10 条提问 / 10 条陈述的分类正确率记录；
    - 去重：同一音频播两遍只投一次；
-   - 缓冲：热键取到最近一段。
+   - 缓冲：热键取到最近一段；
+   - 选择对话（v1.3）：`listSessions` 过滤空/子代理会话并按更新时间排序；固定会话存在时优先于最近会话；固定会话消失时拒绝投递（`reason:'no-session'` + `errors`）。
 2. **线上 E2E**（真实应用 + TTS 音频）：用 SAPI 生成已知中文提问（已有 `speech-zh.wav` 同类脚本）→ 播放 → 期望**对话里**出现 `[模拟面试·面试官提问] 已知文本` + Agent 回答；跑 3 轮。
 3. **UI 验收**：`client/Slots.listSubTree {root:'sidebar.panellist'}` 出现 `interview`（order 40），`{root:'main'}` 出现 key `interview`；点图标能进/出面板；面板里开始/停止监听生效；侧边栏折叠（rail）时图标仍可用。
 4. **稳定性**：连续 30 分钟播放音频片段，检查内存/句柄、设备是否被独占、投递条数与真实提问数一致。
-5. **错误路径**：无默认设备、录音进程被杀、转写失败、会话忙、无打开会话、Agent 报错 —— 每种都要有明确提示且能自动恢复下一段。
+5. **错误路径**：无默认设备、录音进程被杀、转写失败、会话忙、无打开会话、**选定的对话消失（v1.3：拒绝投递并提示，不改投）**、Agent 报错 —— 每种都要有明确提示且能自动恢复下一段。
 
 ---
 

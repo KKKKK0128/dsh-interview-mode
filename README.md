@@ -3,7 +3,7 @@
 一个 DSH Desktop 的「模式」插件（`agentPresets` 里的 **mock-interview / 模拟面试模式**）：把电脑正在播放的声音**实时**采集下来，本地转写成文字，自动判断其中哪些话是**面试官提问**，再把提问作为聊天消息投递给**当前会话**的 Agent，让答案直接出现在对话里。
 
 - 采集与识别复用已装的 [`dsh-system-audio`](../dsh-system-audio)（WASAPI 环回 `native/LoopbackRecorder.exe` + 本地 SenseVoice），本插件只负责**分段、判定、投递、界面**。
-- 设计文档见 [`PLAN.md`](./PLAN.md)（v1.1，含取舍与被否掉的方案）。
+- 设计文档见 [`PLAN.md`](./PLAN.md)（v1.3，含取舍与被否掉的方案）。
 
 ## 安装
 
@@ -23,10 +23,15 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 
 | 动作 | 位置 |
 | --- | --- |
-| 开始/停止监听 | 侧边栏「模拟面试」图标 → 主面板的开关（**手动开始**，不自动开麦） |
-| 强制补答最近一句 | 面板「补答最近一句」按钮，或热键 **Ctrl+Shift+I** |
-| 设备 / 静音阈值 / 自动回答 | 面板里的下拉与输入框（`POST /interview/config`） |
+| 开始/停止监听 | **右侧栏「模拟面试转写」标签页**的开关，或左面板设置里的同一个开关（**手动开始**，不自动开麦） |
+| 强制补答最近一句 | 标签页/面板的「补答最近一句」按钮，或热键 **Ctrl+Shift+I** |
+| 查看转写历史 | 右侧栏标签页：实时电平、最近一句、片段列表（时间 / 文本 / 是否已投递 / 补答 / 复制） |
+| 打开转写标签页 | 开始监听后自动打开一次；也可在右侧栏 `+` 菜单里选「模拟面试转写」 |
+| 设备 / 静音阈值 / 自动回答 | 左栏「模拟面试」图标 → 主面板（**只留设置**），写 `POST /interview/config` |
+| 选择投递到哪个对话 | 主面板设置里的「**选择对话**」下拉框（`targetSessionId`）。默认 `Auto` = 跟随当前打开的会话；选中某个对话后，所有提问都投到它，选中的对话被关掉时**拒绝投递并提示**，不会改投到别的会话 |
 | 提问与答案 | **对话里**：提问以 `[模拟面试·面试官提问] …` 消息进入当前会话，Agent 的回答就是普通回复 |
+
+右侧栏标签页由可选插件 [`DSH-better-sidebar`](https://www.npmjs.com/package/dsh-better-sidebar) 提供（DSH 客户端服务 `ctx.betterSidebar`）；没装它时插件自动退回「全部功能都在左面板」的旧形态，不报错。面板与标签页的内容超出高度时可**上下滚动**（转写列表另有独立滚动区，最多占 46vh，保证上方的开关始终可见）。
 
 采集是「按静音切段」的循环：每段独立录音 → 转写 → 判定 → 投递，所以长面试不会攒成一个巨型音频。
 
@@ -42,6 +47,7 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 | `dupSimilarity` / `dupWindowMs` | 0.9 / 10000 | 10 秒内相似度 ≥0.9 的提问视为重复，丢弃 |
 | `minQuestionChars` | 6 | 归一化后短于 6 字的段不投递 |
 | `autoAnswer` | true | 自动投递；关掉后只能热键补答 |
+| `targetSessionId` | `''` | 投递目标对话：`''` = 跟随当前会话；非空 = 固定投到该会话 |
 | `maxBufferSeconds` / `maxSegments` | 30 / 60 | 滚动缓冲，供「补答最近一句」 |
 | `interruptWhenBusy` | false | Agent 忙时排队（**默认**），true 才 `cancel` 后 `steer` |
 | `language` | `auto` | 跟随 SenseVoice 判定 |
@@ -52,15 +58,16 @@ $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\ds
 ```
 GET  /interview/ping         → { ok, engine:'idle'|'listening', sessionId, preset:{id,ok,error,registeredAt} }
 GET  /interview/status       → 状态快照：state/sessionId/level/lastText/delivered/dropped/errors/settings/segments[]
+GET  /interview/sessions     → { ok, error, items:[{ sessionId, title, updatedAt, running, blank, current, target }], current, target }
 GET  /interview/devices      → { ok, default, devices[], speech }
 POST /interview/start        → { ok, state }   body: { sessionId?, deviceId? }
 POST /interview/stop         → { ok, state }
 POST /interview/answer-last  → { ok, delivered, text }   热键/按钮的补答
-POST /interview/config       → { ok, settings }  body: { deviceId?, autoAnswer?, silenceMs?, language?, hotkey?, interruptWhenBusy? }
+POST /interview/config       → { ok, settings }  body: { deviceId?, autoAnswer?, silenceMs?, targetSessionId?, language?, hotkey?, interruptWhenBusy? }
 ```
 
 投递走宿主服务 `sessionController.prompt({ requestId, sessionId, mode, content:[{type:'text',text}] }, signal)`：
-- `sessionId` 面板没指定时，从 `sessionController.list()` 里挑「最近更新的非空会话」（`errors` 会记录「没有可投递的会话」）。
+- `sessionId` 面板没指定时，从 `sessionController.list()` 里挑「最近更新的非空会话」（`errors` 会记录「没有可投递的会话」）；面板指定了 `targetSessionId` 时固定用它，找不到就**拒绝投递**并在 `errors` 里报「选定的对话已不存在」（片段标 `reason:'no-session'`），不改投到别的会话。
 - **第二个参数 AbortSignal 必须传**：服务内部会调用 `signal.throwIfAborted()`，漏传会以 `Cannot read properties of undefined (reading 'throwIfAborted')` 静默失败（本项目踩过，见 `.test/engine-check.mjs` 的假实现已强制校验）。
 
 ## 文件
@@ -69,7 +76,7 @@ POST /interview/config       → { ok, settings }  body: { deviceId?, autoAnswer
 lib/index.js    宿主入口：注册 preset（mock-interview）+ 3 个 agent 工具用的依赖 + /interview 路由
 lib/engine.js   分段引擎（状态机、去重、忙时排队、滚动缓冲、投递）
 lib/prompt.js   模式提示词 section、提问判定（CJK/英文线索 + 结尾问号）、文本归一化与相似度
-lib/routes.js   7 条 exact 路由 + JSON 助手
+lib/routes.js   8 条 exact 路由 + JSON 助手
 lib/client.js   浏览器半：sidebar.panellist 图标（id interview, order 40）+ main 面板（key interview）
 cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.client.platform）
 ```
@@ -80,9 +87,9 @@ cordis.patch.yml / package.json   bundle 元数据（dsh.bundle.patch / dsh.clie
 
 ```bash
 NODE="$USERPROFILE/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
-"$NODE" .test/engine-check.mjs    # 16/16：提问判定、相似度、会话选择、分段引擎、忙时排队、静音段丢弃、config 夹取
-"$NODE" .test/host-check.mjs      # 10/10：路由行为 + 卸载
-"$NODE" .test/client-check.mjs    # 侧边栏注册 + 面板渲染（含 dsh-system-audio 不再注册输入框按钮）
+"$NODE" .test/engine-check.mjs    # 21/21：提问判定、相似度、会话选择（含固定目标会话 / 目标消失拒投）、分段引擎、忙时排队、静音段丢弃、config 夹取
+"$NODE" .test/host-check.mjs      # 11/11：路由行为（含 GET /interview/sessions）+ 卸载
+"$NODE" .test/client-check.mjs    # 侧边栏注册 + 面板渲染 + 选择对话下拉框（含 dsh-system-audio 不再注册输入框按钮）
 ```
 
 现场端到端（**需要非沙箱**：沙箱进程放出的声音进不了环回采集）：
