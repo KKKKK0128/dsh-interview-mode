@@ -10,6 +10,9 @@ node_modules/
 # 测试临时目录（.test/knowledge-check.mjs 跑完会自行清理）
 .test/.fixture-kb/
 
+# 现场端到端用的知识库夹具与报告（.test/live-kb.ps1 每次重建）
+.test/.kb-live/
+
 # 系统噪声
 Thumbs.db
 .DS_Store

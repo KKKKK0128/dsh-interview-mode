@@ -105,6 +105,12 @@ NODE="$USERPROFILE/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/n
 pwsh -NoProfile -File .test/live-interview.ps1
 ```
 
+知识库现场校验（自己配一个 `.test/.kb-live/bio.md` 夹具 → 设成当前知识库 → 放一段提问 → 读 `.test/.kb-live/report.json` 看 `delivered` 与投递内容里有没有 `[知识库]` 段）。脚本故意写成纯 ASCII，中文放在 UTF-8 的 `.kb-live-question.txt` 里——Windows PowerShell 5.1 会把无 BOM 的 `.ps1` 当 ANSI 读，中文直接语法报错；本机沙箱里 SAPI 有时没有可用语音，脚本会自动退回仓库里预生成的 `question-zh.wav`：
+
+```powershell
+powershell.exe -NoProfile -File .test/live-kb.ps1
+```
+
 它会用 SAPI 合成一句「提问 + 陈述 + 提问」的中文（`.test/question-zh.wav`，已生成则复用），`POST /interview/start` 后播放，再打印 `/interview/status` 与 `/interview/stop`。
 
 **2026-10-16 实测**：3 段全部转写正确；「请你介绍一下你在光电硬件方面最擅长的项目经验。」与「…难点在哪里呢？」判定为提问并 `delivered:true`；「后来读了硕士。」判为陈述丢弃；`errors: []`；`sessionId` 自动解析为当时的活动会话。
