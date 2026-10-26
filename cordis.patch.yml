@@ -1,0 +1,9 @@
+# dsh-interview-mode bundle patch.
+#
+# Contributes ONE host row: the mode plugin that declares the 「模拟面试模式」
+# agent preset, injects the mode prompt section, and serves the /interview/*
+# routes used by the sidebar panel. Additive `insert` only — nothing shipped by
+# DSH is overridden.
+- insert:
+    - id: interview-mode
+      name: 'dsh-interview-mode'

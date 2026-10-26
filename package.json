@@ -1,0 +1,63 @@
+{
+  "name": "dsh-interview-mode",
+  "version": "0.1.0",
+  "private": false,
+  "description": "DSH 模拟面试模式：实时采集电脑播放的声音，自动把面试官提问交给当前会话的 Agent，热键可强制补答。",
+  "author": "KKKKK0128",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KKKKK0128/dsh-interview-mode.git"
+  },
+  "homepage": "https://github.com/KKKKK0128/dsh-interview-mode#readme",
+  "bugs": {
+    "url": "https://github.com/KKKKK0128/dsh-interview-mode/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "interview",
+    "mock-interview",
+    "system-audio",
+    "speech-to-text"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./engine": "./lib/engine.js",
+    "./prompt": "./lib/prompt.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "dsh-system-audio": "link:../dsh-system-audio"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    },
+    "manifestVersion": 1
+  }
+}
